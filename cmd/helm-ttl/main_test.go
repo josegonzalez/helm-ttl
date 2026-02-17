@@ -1,0 +1,562 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os"
+	"testing"
+
+	"github.com/josegonzalez/helm-ttl/pkg/ttl"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
+
+	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/chart"
+	helmrelease "helm.sh/helm/v3/pkg/release"
+	"helm.sh/helm/v3/pkg/storage"
+	"helm.sh/helm/v3/pkg/storage/driver"
+)
+
+func setupTestStore(t *testing.T, releaseName, namespace string) *storage.Storage {
+	t.Helper()
+
+	mem := driver.NewMemory()
+	store := storage.Init(mem)
+
+	rel := &helmrelease.Release{
+		Name:      releaseName,
+		Namespace: namespace,
+		Version:   1,
+		Info: &helmrelease.Info{
+			Status: helmrelease.StatusDeployed,
+		},
+		Chart: &chart.Chart{
+			Metadata: &chart.Metadata{
+				Name:    "test-chart",
+				Version: "1.0.0",
+			},
+		},
+	}
+	err := store.Create(rel)
+	require.NoError(t, err)
+
+	return store
+}
+
+func testConfigFactory(store *storage.Storage) configFactory {
+	return func() (*action.Configuration, error) {
+		return &action.Configuration{Releases: store}, nil
+	}
+}
+
+func testKubeFactoryWithClient(client kubernetes.Interface) kubeClientFactory {
+	return func() (kubernetes.Interface, error) {
+		return client, nil
+	}
+}
+
+func errorConfigFactory() configFactory {
+	return func() (*action.Configuration, error) {
+		return nil, errors.New("config error")
+	}
+}
+
+func errorKubeFactory() kubeClientFactory {
+	return func() (kubernetes.Interface, error) {
+		return nil, errors.New("kube error")
+	}
+}
+
+func TestNewRootCmd(t *testing.T) {
+	cmd := newRootCmd(defaultConfigFactory, defaultKubeClientFactory)
+	assert.Equal(t, "helm-ttl", cmd.Use)
+	assert.Equal(t, version, cmd.Version)
+
+	// Should have 4 subcommands
+	assert.Len(t, cmd.Commands(), 4)
+
+	names := make([]string, 0, len(cmd.Commands()))
+	for _, c := range cmd.Commands() {
+		names = append(names, c.Name())
+	}
+	assert.Contains(t, names, "set")
+	assert.Contains(t, names, "get")
+	assert.Contains(t, names, "unset")
+	assert.Contains(t, names, "cleanup-rbac")
+}
+
+func TestSetCmd(t *testing.T) {
+	origNs := os.Getenv("HELM_NAMESPACE")
+	defer func() { _ = os.Setenv("HELM_NAMESPACE", origNs) }()
+	_ = os.Setenv("HELM_NAMESPACE", "default")
+
+	t.Run("set TTL with create-service-account", func(t *testing.T) {
+		store := setupTestStore(t, "myapp", "default")
+		client := fake.NewClientset()
+
+		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"set", "myapp", "24h", "--create-service-account"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "TTL set")
+		assert.Contains(t, buf.String(), "myapp")
+
+		// Verify CronJob was created
+		ctx := context.Background()
+		cj, err := client.BatchV1().CronJobs("default").Get(ctx, "myapp-default-ttl", metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, "myapp-default-ttl", cj.Name)
+	})
+
+	t.Run("set TTL with existing service account", func(t *testing.T) {
+		store := setupTestStore(t, "myapp", "default")
+		client := fake.NewClientset(&corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-sa", Namespace: "default"},
+		})
+
+		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"set", "myapp", "2h", "--service-account", "my-sa"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+	})
+
+	t.Run("release not found", func(t *testing.T) {
+		mem := driver.NewMemory()
+		store := storage.Init(mem)
+		client := fake.NewClientset()
+
+		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"set", "nonexistent", "1h", "--create-service-account"})
+
+		err := cmd.Execute()
+		assert.Error(t, err)
+	})
+
+	t.Run("service account not found", func(t *testing.T) {
+		store := setupTestStore(t, "myapp", "default")
+		client := fake.NewClientset()
+
+		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"set", "myapp", "1h", "--service-account", "nonexistent"})
+
+		err := cmd.Execute()
+		assert.Error(t, err)
+	})
+
+	t.Run("config error", func(t *testing.T) {
+		client := fake.NewClientset()
+
+		cmd := newRootCmd(errorConfigFactory(), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"set", "myapp", "1h"})
+
+		err := cmd.Execute()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "configuration")
+	})
+
+	t.Run("kube client error", func(t *testing.T) {
+		store := setupTestStore(t, "myapp", "default")
+
+		cmd := newRootCmd(testConfigFactory(store), errorKubeFactory())
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"set", "myapp", "1h"})
+
+		err := cmd.Execute()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "kubernetes client")
+	})
+
+	t.Run("too few args", func(t *testing.T) {
+		cmd := newRootCmd(defaultConfigFactory, defaultKubeClientFactory)
+		cmd.SetArgs([]string{"set", "myapp"})
+		err := cmd.Execute()
+		assert.Error(t, err)
+	})
+
+	t.Run("delete-namespace flag", func(t *testing.T) {
+		_ = os.Setenv("HELM_NAMESPACE", "staging")
+		defer func() { _ = os.Setenv("HELM_NAMESPACE", "default") }()
+
+		store := setupTestStore(t, "myapp", "staging")
+		client := fake.NewClientset()
+
+		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"set", "myapp", "7d", "--create-service-account", "--cronjob-namespace", "ops", "--delete-namespace"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		cj, err := client.BatchV1().CronJobs("ops").Get(ctx, "myapp-staging-ttl", metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, "true", cj.Labels[ttl.LabelDeleteNamespace])
+	})
+
+	t.Run("custom images", func(t *testing.T) {
+		store := setupTestStore(t, "myapp", "default")
+		client := fake.NewClientset()
+
+		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"set", "myapp", "1h", "--create-service-account", "--helm-image", "custom/helm:v3", "--kubectl-image", "custom/kubectl:v1"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		cj, err := client.BatchV1().CronJobs("default").Get(ctx, "myapp-default-ttl", metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, "custom/helm:v3", cj.Spec.JobTemplate.Spec.Template.Spec.InitContainers[0].Image)
+		assert.Equal(t, "custom/kubectl:v1", cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Image)
+	})
+}
+
+func TestGetCmd(t *testing.T) {
+	origNs := os.Getenv("HELM_NAMESPACE")
+	defer func() { _ = os.Setenv("HELM_NAMESPACE", origNs) }()
+	_ = os.Setenv("HELM_NAMESPACE", "default")
+
+	t.Run("get TTL - text output", func(t *testing.T) {
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-default-ttl",
+				Namespace: "default",
+				Labels: map[string]string{
+					ttl.LabelManagedBy:        ttl.LabelManagedByValue,
+					ttl.LabelRelease:          "myapp",
+					ttl.LabelReleaseNamespace: "default",
+					ttl.LabelCronjobNamespace: "default",
+					ttl.LabelDeleteNamespace:  "false",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "30 14 15 3 *",
+			},
+		})
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"get", "myapp"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "myapp")
+		assert.Contains(t, buf.String(), "30 14 15 3 *")
+	})
+
+	t.Run("get TTL - json output", func(t *testing.T) {
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-default-ttl",
+				Namespace: "default",
+				Labels: map[string]string{
+					ttl.LabelManagedBy:        ttl.LabelManagedByValue,
+					ttl.LabelRelease:          "myapp",
+					ttl.LabelReleaseNamespace: "default",
+					ttl.LabelCronjobNamespace: "default",
+					ttl.LabelDeleteNamespace:  "false",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "30 14 15 3 *",
+			},
+		})
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"get", "myapp", "-o", "json"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), `"release_name": "myapp"`)
+	})
+
+	t.Run("get TTL - yaml output", func(t *testing.T) {
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-default-ttl",
+				Namespace: "default",
+				Labels: map[string]string{
+					ttl.LabelManagedBy:        ttl.LabelManagedByValue,
+					ttl.LabelRelease:          "myapp",
+					ttl.LabelReleaseNamespace: "default",
+					ttl.LabelCronjobNamespace: "default",
+					ttl.LabelDeleteNamespace:  "false",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "30 14 15 3 *",
+			},
+		})
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"get", "myapp", "-o", "yaml"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "release_name: myapp")
+	})
+
+	t.Run("TTL not found", func(t *testing.T) {
+		client := fake.NewClientset()
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"get", "myapp"})
+
+		err := cmd.Execute()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no TTL set")
+	})
+
+	t.Run("kube client error", func(t *testing.T) {
+		cmd := newRootCmd(defaultConfigFactory, errorKubeFactory())
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"get", "myapp"})
+
+		err := cmd.Execute()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "kubernetes client")
+	})
+
+	t.Run("cross-namespace get", func(t *testing.T) {
+		_ = os.Setenv("HELM_NAMESPACE", "staging")
+		defer func() { _ = os.Setenv("HELM_NAMESPACE", "default") }()
+
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-staging-ttl",
+				Namespace: "ops",
+				Labels: map[string]string{
+					ttl.LabelManagedBy:        ttl.LabelManagedByValue,
+					ttl.LabelRelease:          "myapp",
+					ttl.LabelReleaseNamespace: "staging",
+					ttl.LabelCronjobNamespace: "ops",
+					ttl.LabelDeleteNamespace:  "true",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "0 12 1 1 *",
+			},
+		})
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"get", "myapp", "--cronjob-namespace", "ops"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "staging")
+		assert.Contains(t, buf.String(), "ops")
+	})
+}
+
+func TestUnsetCmd(t *testing.T) {
+	origNs := os.Getenv("HELM_NAMESPACE")
+	defer func() { _ = os.Setenv("HELM_NAMESPACE", origNs) }()
+	_ = os.Setenv("HELM_NAMESPACE", "default")
+
+	t.Run("unset existing TTL", func(t *testing.T) {
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-default-ttl",
+				Namespace: "default",
+				Labels: map[string]string{
+					ttl.LabelManagedBy: ttl.LabelManagedByValue,
+					ttl.LabelRelease:   "myapp",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "30 14 15 6 *",
+			},
+		})
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"unset", "myapp"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "TTL removed")
+	})
+
+	t.Run("unset TTL not found", func(t *testing.T) {
+		client := fake.NewClientset()
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"unset", "myapp"})
+
+		err := cmd.Execute()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no TTL set")
+	})
+
+	t.Run("kube client error", func(t *testing.T) {
+		cmd := newRootCmd(defaultConfigFactory, errorKubeFactory())
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"unset", "myapp"})
+
+		err := cmd.Execute()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "kubernetes client")
+	})
+}
+
+func TestCleanupRBACCmd(t *testing.T) {
+	origNs := os.Getenv("HELM_NAMESPACE")
+	defer func() { _ = os.Setenv("HELM_NAMESPACE", origNs) }()
+	_ = os.Setenv("HELM_NAMESPACE", "default")
+
+	t.Run("no orphans found", func(t *testing.T) {
+		client := fake.NewClientset()
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"cleanup-rbac"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "No orphaned resources found")
+	})
+
+	t.Run("finds and deletes orphans", func(t *testing.T) {
+		labels := map[string]string{
+			ttl.LabelManagedBy:        ttl.LabelManagedByValue,
+			ttl.LabelRelease:          "myapp",
+			ttl.LabelReleaseNamespace: "default",
+			ttl.LabelCronjobNamespace: "default",
+		}
+
+		client := fake.NewClientset(
+			&corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{Name: "myapp-default-ttl", Namespace: "default", Labels: labels},
+			},
+		)
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"cleanup-rbac"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "Deleted")
+	})
+
+	t.Run("dry run", func(t *testing.T) {
+		labels := map[string]string{
+			ttl.LabelManagedBy:        ttl.LabelManagedByValue,
+			ttl.LabelRelease:          "myapp",
+			ttl.LabelReleaseNamespace: "default",
+			ttl.LabelCronjobNamespace: "default",
+		}
+
+		client := fake.NewClientset(
+			&corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{Name: "myapp-default-ttl", Namespace: "default", Labels: labels},
+			},
+		)
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"cleanup-rbac", "--dry-run"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "Would delete")
+	})
+
+	t.Run("kube client error", func(t *testing.T) {
+		cmd := newRootCmd(defaultConfigFactory, errorKubeFactory())
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"cleanup-rbac"})
+
+		err := cmd.Execute()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "kubernetes client")
+	})
+
+	t.Run("rejects extra args", func(t *testing.T) {
+		cmd := newRootCmd(defaultConfigFactory, defaultKubeClientFactory)
+		cmd.SetArgs([]string{"cleanup-rbac", "extra"})
+		err := cmd.Execute()
+		assert.Error(t, err)
+	})
+}
+
+func TestGetReleaseNamespace(t *testing.T) {
+	origNs := os.Getenv("HELM_NAMESPACE")
+	defer func() { _ = os.Setenv("HELM_NAMESPACE", origNs) }()
+
+	t.Run("with HELM_NAMESPACE set", func(t *testing.T) {
+		_ = os.Setenv("HELM_NAMESPACE", "custom-ns")
+		assert.Equal(t, "custom-ns", getReleaseNamespace())
+	})
+
+	t.Run("with HELM_NAMESPACE empty", func(t *testing.T) {
+		_ = os.Setenv("HELM_NAMESPACE", "")
+		assert.Equal(t, "default", getReleaseNamespace())
+	})
+
+	t.Run("with HELM_NAMESPACE unset", func(t *testing.T) {
+		_ = os.Unsetenv("HELM_NAMESPACE")
+		assert.Equal(t, "default", getReleaseNamespace())
+	})
+}

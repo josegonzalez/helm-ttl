@@ -1,0 +1,26 @@
+name: "ttl"
+version: "0.1.0"
+usage: "helm ttl [set|get|unset|cleanup-rbac] [args]"
+description: "Manage TTL (time-to-live) for Helm releases"
+ignoreFlags: false
+platformCommand:
+  - os: darwin
+    arch: amd64
+    command: "$HELM_PLUGIN_DIR/bin/helm-ttl"
+  - os: darwin
+    arch: arm64
+    command: "$HELM_PLUGIN_DIR/bin/helm-ttl"
+  - os: linux
+    arch: amd64
+    command: "$HELM_PLUGIN_DIR/bin/helm-ttl"
+  - os: linux
+    arch: arm64
+    command: "$HELM_PLUGIN_DIR/bin/helm-ttl"
+  - os: windows
+    arch: amd64
+    command: "$HELM_PLUGIN_DIR/bin/helm-ttl.exe"
+platformHooks:
+  install:
+    - command: "${HELM_PLUGIN_DIR}/scripts/install.sh"
+  update:
+    - command: "${HELM_PLUGIN_DIR}/scripts/install.sh"

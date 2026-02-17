@@ -1,0 +1,59 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests with coverage
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Check coverage
+        run: |
+          echo "Coverage by function:"
+          go tool cover -func=coverage.out
+          echo ""
+          # Check pkg/status coverage (core logic) - must be 100%
+          PKG_COVERAGE=$(go tool cover -func=coverage.out | grep "pkg/status" | grep "total" | awk '{print $3}' | sed 's/%//' || echo "0")
+          if [ -z "$PKG_COVERAGE" ]; then
+            # Calculate pkg/status coverage manually
+            PKG_COVERAGE=$(go tool cover -func=coverage.out | grep "pkg/status/" | awk '{sum+=$3; count++} END {if(count>0) print sum/count; else print 0}')
+          fi
+          echo "Package coverage (pkg/status): ${PKG_COVERAGE}%"
+          # Total coverage check (allows for main() not being tested)
+          TOTAL_COVERAGE=$(go tool cover -func=coverage.out | grep "^total:" | awk '{print $3}' | sed 's/%//')
+          echo "Total coverage: ${TOTAL_COVERAGE}%"
+          # Require at least 95% total coverage
+          if [ "$(echo "$TOTAL_COVERAGE < 95" | bc)" -eq 1 ]; then
+            echo "Coverage is below 95%!"
+            exit 1
+          fi
+          echo "Coverage check passed!"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          args: --timeout 5m --verbose
