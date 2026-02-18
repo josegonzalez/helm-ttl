@@ -75,6 +75,7 @@ will be automatically uninstalled via a Kubernetes CronJob.
 Duration supports:
   - Go durations: 30m, 2h, 24h, 168h
   - Days shorthand: 7d, 30d
+  - Human-readable: 6 hours, 3 days, 2 weeks, 30 mins
   - Natural language: tomorrow, "next monday", "in 2 hours"`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {

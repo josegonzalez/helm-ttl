@@ -103,7 +103,8 @@ Durations are tried in this order:
 
 1. **Go durations:** `30m`, `2h`, `2h30m`, `24h`, `168h`
 2. **Days shorthand:** `7d`, `30d`
-3. **Natural language:** `tomorrow`, `next monday`, `in 2 hours`
+3. **Human-readable durations:** `6 hours`, `3 days`, `2 weeks`, `30 mins`
+4. **Natural language:** `tomorrow`, `next monday`, `in 2 hours`
 
 ## Environment Variables
 
