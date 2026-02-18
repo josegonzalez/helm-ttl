@@ -52,7 +52,7 @@ func setupTestStore(t *testing.T, releaseName, namespace string) *storage.Storag
 }
 
 func testConfigFactory(store *storage.Storage) configFactory {
-	return func(_ string) (*action.Configuration, error) {
+	return func(_ string, _ ttl.KubeOptions) (*action.Configuration, error) {
 		return &action.Configuration{
 			Releases:   store,
 			KubeClient: &kubefake.PrintingKubeClient{Out: io.Discard},
@@ -62,19 +62,19 @@ func testConfigFactory(store *storage.Storage) configFactory {
 }
 
 func testKubeFactoryWithClient(client kubernetes.Interface) kubeClientFactory {
-	return func() (kubernetes.Interface, error) {
+	return func(_ ttl.KubeOptions) (kubernetes.Interface, error) {
 		return client, nil
 	}
 }
 
 func errorConfigFactory() configFactory {
-	return func(_ string) (*action.Configuration, error) {
+	return func(_ string, _ ttl.KubeOptions) (*action.Configuration, error) {
 		return nil, errors.New("config error")
 	}
 }
 
 func errorKubeFactory() kubeClientFactory {
-	return func() (kubernetes.Interface, error) {
+	return func(_ ttl.KubeOptions) (kubernetes.Interface, error) {
 		return nil, errors.New("kube error")
 	}
 }
@@ -97,8 +97,24 @@ func TestNewRootCmd(t *testing.T) {
 	assert.Contains(t, names, "run")
 	assert.Contains(t, names, "cleanup-rbac")
 
-	// Should have --release-namespace persistent flag
-	f := cmd.PersistentFlags().Lookup("release-namespace")
+	// Should have --namespace/-n persistent flag
+	f := cmd.PersistentFlags().Lookup("namespace")
+	require.NotNil(t, f)
+	assert.Equal(t, "", f.DefValue)
+	assert.Equal(t, "n", f.Shorthand)
+
+	// Should have --kube-context persistent flag
+	f = cmd.PersistentFlags().Lookup("kube-context")
+	require.NotNil(t, f)
+	assert.Equal(t, "", f.DefValue)
+
+	// Should have --kubeconfig persistent flag
+	f = cmd.PersistentFlags().Lookup("kubeconfig")
+	require.NotNil(t, f)
+	assert.Equal(t, "", f.DefValue)
+
+	// Should have --driver persistent flag
+	f = cmd.PersistentFlags().Lookup("driver")
 	require.NotNil(t, f)
 	assert.Equal(t, "", f.DefValue)
 }
@@ -252,7 +268,7 @@ func TestSetCmd(t *testing.T) {
 		assert.Equal(t, "custom/kubectl:v1", cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Image)
 	})
 
-	t.Run("release-namespace flag overrides env", func(t *testing.T) {
+	t.Run("namespace flag overrides env", func(t *testing.T) {
 		store := setupTestStore(t, "myapp", "staging")
 		client := fake.NewClientset()
 
@@ -260,7 +276,7 @@ func TestSetCmd(t *testing.T) {
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
-		cmd.SetArgs([]string{"set", "myapp", "24h", "--create-service-account", "--release-namespace", "staging"})
+		cmd.SetArgs([]string{"set", "myapp", "24h", "--create-service-account", "--namespace", "staging"})
 
 		err := cmd.Execute()
 		require.NoError(t, err)
@@ -270,6 +286,21 @@ func TestSetCmd(t *testing.T) {
 		cj, err := client.BatchV1().CronJobs("staging").Get(ctx, "myapp-staging-ttl", metav1.GetOptions{})
 		require.NoError(t, err)
 		assert.Equal(t, "myapp-staging-ttl", cj.Name)
+	})
+
+	t.Run("short namespace flag", func(t *testing.T) {
+		store := setupTestStore(t, "myapp", "staging")
+		client := fake.NewClientset()
+
+		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"set", "myapp", "24h", "--create-service-account", "-n", "staging"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "staging")
 	})
 }
 
@@ -425,7 +456,7 @@ func TestGetCmd(t *testing.T) {
 		assert.Contains(t, buf.String(), "ops")
 	})
 
-	t.Run("release-namespace flag overrides env", func(t *testing.T) {
+	t.Run("namespace flag overrides env", func(t *testing.T) {
 		client := fake.NewClientset(&batchv1.CronJob{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "myapp-staging-ttl",
@@ -447,7 +478,7 @@ func TestGetCmd(t *testing.T) {
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
-		cmd.SetArgs([]string{"get", "myapp", "--release-namespace", "staging"})
+		cmd.SetArgs([]string{"get", "myapp", "--namespace", "staging"})
 
 		err := cmd.Execute()
 		require.NoError(t, err)
@@ -512,7 +543,7 @@ func TestUnsetCmd(t *testing.T) {
 		assert.Contains(t, err.Error(), "kubernetes client")
 	})
 
-	t.Run("release-namespace flag overrides env", func(t *testing.T) {
+	t.Run("namespace flag overrides env", func(t *testing.T) {
 		client := fake.NewClientset(&batchv1.CronJob{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "myapp-staging-ttl",
@@ -531,7 +562,7 @@ func TestUnsetCmd(t *testing.T) {
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
-		cmd.SetArgs([]string{"unset", "myapp", "--release-namespace", "staging"})
+		cmd.SetArgs([]string{"unset", "myapp", "--namespace", "staging"})
 
 		err := cmd.Execute()
 		require.NoError(t, err)
@@ -628,7 +659,7 @@ func TestCleanupRBACCmd(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("release-namespace flag overrides env", func(t *testing.T) {
+	t.Run("namespace flag overrides env", func(t *testing.T) {
 		labels := map[string]string{
 			ttl.LabelManagedBy:        ttl.LabelManagedByValue,
 			ttl.LabelRelease:          "myapp",
@@ -646,7 +677,7 @@ func TestCleanupRBACCmd(t *testing.T) {
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
-		cmd.SetArgs([]string{"cleanup-rbac", "--release-namespace", "staging"})
+		cmd.SetArgs([]string{"cleanup-rbac", "--namespace", "staging"})
 
 		err := cmd.Execute()
 		require.NoError(t, err)
@@ -810,7 +841,7 @@ func TestRunCmd(t *testing.T) {
 		assert.Contains(t, stdout.String(), "TTL executed")
 	})
 
-	t.Run("release-namespace flag overrides env", func(t *testing.T) {
+	t.Run("namespace flag overrides env", func(t *testing.T) {
 		store := setupTestStore(t, "myapp", "staging")
 		client := fake.NewClientset(&batchv1.CronJob{
 			ObjectMeta: metav1.ObjectMeta{
@@ -833,7 +864,7 @@ func TestRunCmd(t *testing.T) {
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
-		cmd.SetArgs([]string{"run", "myapp", "--release-namespace", "staging"})
+		cmd.SetArgs([]string{"run", "myapp", "--namespace", "staging"})
 
 		err := cmd.Execute()
 		require.NoError(t, err)
@@ -842,32 +873,126 @@ func TestRunCmd(t *testing.T) {
 	})
 }
 
-func TestGetReleaseNamespace(t *testing.T) {
+func TestGetNamespace(t *testing.T) {
 	origNs := os.Getenv("HELM_NAMESPACE")
 	defer func() { _ = os.Setenv("HELM_NAMESPACE", origNs) }()
 
 	t.Run("with HELM_NAMESPACE set", func(t *testing.T) {
 		_ = os.Setenv("HELM_NAMESPACE", "custom-ns")
-		assert.Equal(t, "custom-ns", getReleaseNamespace(""))
+		gf := &globalFlags{}
+		assert.Equal(t, "custom-ns", gf.getNamespace())
 	})
 
 	t.Run("with HELM_NAMESPACE empty", func(t *testing.T) {
 		_ = os.Setenv("HELM_NAMESPACE", "")
-		assert.Equal(t, "default", getReleaseNamespace(""))
+		gf := &globalFlags{}
+		assert.Equal(t, "default", gf.getNamespace())
 	})
 
 	t.Run("with HELM_NAMESPACE unset", func(t *testing.T) {
 		_ = os.Unsetenv("HELM_NAMESPACE")
-		assert.Equal(t, "default", getReleaseNamespace(""))
+		gf := &globalFlags{}
+		assert.Equal(t, "default", gf.getNamespace())
 	})
 
 	t.Run("override takes precedence over HELM_NAMESPACE", func(t *testing.T) {
 		_ = os.Setenv("HELM_NAMESPACE", "from-env")
-		assert.Equal(t, "from-flag", getReleaseNamespace("from-flag"))
+		gf := &globalFlags{namespace: "from-flag"}
+		assert.Equal(t, "from-flag", gf.getNamespace())
 	})
 
 	t.Run("override takes precedence over default", func(t *testing.T) {
 		_ = os.Unsetenv("HELM_NAMESPACE")
-		assert.Equal(t, "explicit", getReleaseNamespace("explicit"))
+		gf := &globalFlags{namespace: "explicit"}
+		assert.Equal(t, "explicit", gf.getNamespace())
+	})
+}
+
+func TestGlobalFlagsKubeOptions(t *testing.T) {
+	gf := &globalFlags{
+		kubeCtx:    "my-context",
+		kubeconfig: "/path/to/kubeconfig",
+		helmDriver: "memory",
+	}
+
+	opts := gf.kubeOptions()
+	assert.Equal(t, "my-context", opts.KubeContext)
+	assert.Equal(t, "/path/to/kubeconfig", opts.Kubeconfig)
+	assert.Equal(t, "memory", opts.Driver)
+}
+
+func TestNewFlagsPassedToFactories(t *testing.T) {
+	origNs := os.Getenv("HELM_NAMESPACE")
+	defer func() { _ = os.Setenv("HELM_NAMESPACE", origNs) }()
+	_ = os.Setenv("HELM_NAMESPACE", "default")
+
+	t.Run("kube-context flag is passed through", func(t *testing.T) {
+		var capturedOpts ttl.KubeOptions
+		cfgFactory := func(_ string, opts ttl.KubeOptions) (*action.Configuration, error) {
+			capturedOpts = opts
+			mem := driver.NewMemory()
+			store := storage.Init(mem)
+			return &action.Configuration{
+				Releases:   store,
+				KubeClient: &kubefake.PrintingKubeClient{Out: io.Discard},
+				Log:        func(format string, v ...interface{}) {},
+			}, nil
+		}
+		kubeFactory := func(_ ttl.KubeOptions) (kubernetes.Interface, error) {
+			return fake.NewClientset(), nil
+		}
+
+		cmd := newRootCmd(cfgFactory, kubeFactory)
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"set", "myapp", "1h", "--create-service-account", "--kube-context", "my-ctx"})
+
+		_ = cmd.Execute()
+		assert.Equal(t, "my-ctx", capturedOpts.KubeContext)
+	})
+
+	t.Run("kubeconfig flag is passed through", func(t *testing.T) {
+		var capturedOpts ttl.KubeOptions
+		kubeFactory := func(opts ttl.KubeOptions) (kubernetes.Interface, error) {
+			capturedOpts = opts
+			return fake.NewClientset(), nil
+		}
+
+		store := setupTestStore(t, "myapp", "default")
+		cmd := newRootCmd(testConfigFactory(store), kubeFactory)
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"set", "myapp", "1h", "--create-service-account", "--kubeconfig", "/my/kubeconfig"})
+
+		_ = cmd.Execute()
+		assert.Equal(t, "/my/kubeconfig", capturedOpts.Kubeconfig)
+	})
+
+	t.Run("driver flag is passed through", func(t *testing.T) {
+		var capturedOpts ttl.KubeOptions
+		cfgFactory := func(_ string, opts ttl.KubeOptions) (*action.Configuration, error) {
+			capturedOpts = opts
+			mem := driver.NewMemory()
+			store := storage.Init(mem)
+			return &action.Configuration{
+				Releases:   store,
+				KubeClient: &kubefake.PrintingKubeClient{Out: io.Discard},
+				Log:        func(format string, v ...interface{}) {},
+			}, nil
+		}
+		kubeFactory := func(_ ttl.KubeOptions) (kubernetes.Interface, error) {
+			return fake.NewClientset(), nil
+		}
+
+		cmd := newRootCmd(cfgFactory, kubeFactory)
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"set", "myapp", "1h", "--create-service-account", "--driver", "memory"})
+
+		_ = cmd.Execute()
+		assert.Equal(t, "memory", capturedOpts.Driver)
 	})
 }

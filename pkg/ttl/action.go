@@ -9,7 +9,7 @@ import (
 // NewConfiguration creates a new Helm action configuration.
 // When namespace is non-empty it is used directly; otherwise the
 // value falls back to the HELM_NAMESPACE env var or "default".
-func NewConfiguration(namespace string) (*action.Configuration, error) {
+func NewConfiguration(namespace string, opts KubeOptions) (*action.Configuration, error) {
 	cfg := new(action.Configuration)
 
 	if namespace == "" {
@@ -19,13 +19,16 @@ func NewConfiguration(namespace string) (*action.Configuration, error) {
 		namespace = "default"
 	}
 
-	driver := os.Getenv("HELM_DRIVER")
+	driver := opts.Driver
+	if driver == "" {
+		driver = os.Getenv("HELM_DRIVER")
+	}
 	if driver == "" {
 		driver = "secrets"
 	}
 
 	if err := cfg.Init(
-		NewRESTClientGetter(namespace),
+		NewRESTClientGetter(namespace, opts),
 		namespace,
 		driver,
 		func(format string, v ...interface{}) {},

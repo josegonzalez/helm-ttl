@@ -41,14 +41,27 @@ helm ttl COMMAND [ARGS...] [FLAGS...]
 | `run`   | Immediately execute the TTL action |
 | `cleanup-rbac` | Delete orphaned RBAC resources |
 
+### Global Flags
+
+These flags are available on all subcommands:
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `-n, --namespace` | `HELM_NAMESPACE` or `default` | Override the release namespace |
+| `--kube-context` | `HELM_KUBECONTEXT` | Override the Kubernetes context |
+| `--kubeconfig` | `KUBECONFIG` | Path to kubeconfig file |
+| `--driver` | `HELM_DRIVER` or `secrets` | Helm storage driver |
+
+Flag values take priority over environment variables.
+
 ### Environment Variables
 
-| Variable | Description |
-| -------- | ----------- |
-| `HELM_NAMESPACE` | Release namespace (set by Helm; overridden by `--release-namespace`) |
-| `HELM_KUBECONTEXT` | Kubernetes context to use |
-| `HELM_DRIVER` | Helm storage driver (default: `secrets`) |
-| `KUBECONFIG` | Path to kubeconfig file |
+| Variable | Flag Override | Description |
+| -------- | ------------ | ----------- |
+| `HELM_NAMESPACE` | `-n, --namespace` | Release namespace (set by Helm) |
+| `HELM_KUBECONTEXT` | `--kube-context` | Kubernetes context to use |
+| `HELM_DRIVER` | `--driver` | Helm storage driver (default: `secrets`) |
+| `KUBECONFIG` | `--kubeconfig` | Path to kubeconfig file |
 
 ## Commands
 
@@ -66,7 +79,6 @@ Set a TTL for a Helm release. Creates a CronJob that will uninstall the release 
 | `--kubectl-image` | vendored | kubectl container image |
 | `--cronjob-namespace` | release namespace | Namespace for the CronJob |
 | `--delete-namespace` | `false` | Also delete the release namespace after uninstalling |
-| `--release-namespace` | `HELM_NAMESPACE` or `default` | Override the release namespace |
 
 **Examples:**
 
@@ -84,7 +96,7 @@ helm ttl set my-release "next monday" --create-service-account
 helm ttl set my-release 2h --service-account my-sa
 
 # Set TTL targeting a specific release namespace
-helm ttl set my-release 24h --create-service-account --release-namespace staging
+helm ttl set my-release 24h --create-service-account -n staging
 
 # Set TTL in a different namespace for the CronJob
 helm ttl set my-release 7d --create-service-account --cronjob-namespace ops
@@ -103,7 +115,6 @@ Get the current TTL for a release.
 | ---- | ------- | ----------- |
 | `-o, --output` | `text` | Output format: text, yaml, json |
 | `--cronjob-namespace` | release namespace | Namespace where the CronJob lives |
-| `--release-namespace` | `HELM_NAMESPACE` or `default` | Override the release namespace |
 
 **Examples:**
 
@@ -112,7 +123,7 @@ Get the current TTL for a release.
 helm ttl get my-release
 
 # Get TTL for a release in a specific namespace
-helm ttl get my-release --release-namespace staging
+helm ttl get my-release -n staging
 
 # Get TTL in JSON format
 helm ttl get my-release -o json
@@ -121,7 +132,7 @@ helm ttl get my-release -o json
 helm ttl get my-release -o yaml
 
 # Get TTL when the CronJob is in a different namespace than the release
-helm ttl get my-release --release-namespace staging --cronjob-namespace ops
+helm ttl get my-release -n staging --cronjob-namespace ops
 ```
 
 ### `helm ttl unset RELEASE [flags]`
@@ -133,7 +144,6 @@ Remove TTL from a release by deleting the CronJob and cleaning up RBAC resources
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
 | `--cronjob-namespace` | release namespace | Namespace where the CronJob lives |
-| `--release-namespace` | `HELM_NAMESPACE` or `default` | Override the release namespace |
 
 **Examples:**
 
@@ -142,7 +152,7 @@ Remove TTL from a release by deleting the CronJob and cleaning up RBAC resources
 helm ttl unset my-release
 
 # Remove TTL when the CronJob is in a different namespace than the release
-helm ttl unset my-release --release-namespace staging --cronjob-namespace ops
+helm ttl unset my-release -n staging --cronjob-namespace ops
 ```
 
 ### `helm ttl run RELEASE [flags]`
@@ -156,7 +166,6 @@ A TTL must already be set for the release (via `helm ttl set`).
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
 | `--cronjob-namespace` | release namespace | Namespace where the CronJob lives |
-| `--release-namespace` | `HELM_NAMESPACE` or `default` | Override the release namespace |
 
 **Examples:**
 
@@ -168,7 +177,7 @@ helm ttl run my-release
 helm ttl run my-release --cronjob-namespace ops
 
 # Immediately execute TTL with cross-namespace setup
-helm ttl run my-release --release-namespace staging --cronjob-namespace ops
+helm ttl run my-release -n staging --cronjob-namespace ops
 ```
 
 ### `helm ttl cleanup-rbac [flags]`
@@ -181,7 +190,6 @@ Delete orphaned ServiceAccount and RBAC resources whose CronJobs have already fi
 | ---- | ------- | ----------- |
 | `--dry-run` | `false` | Print what would be deleted without deleting |
 | `-A, --all-namespaces` | `false` | Search all namespaces for orphaned resources |
-| `--release-namespace` | `HELM_NAMESPACE` or `default` | Override the release namespace |
 
 **Examples:**
 
@@ -356,14 +364,14 @@ When the CronJob should run in a different namespace than the release (e.g., a s
 
 ```bash
 helm ttl set my-release 7d --create-service-account \
-  --release-namespace staging --cronjob-namespace ops
+  -n staging --cronjob-namespace ops
 ```
 
 To also delete the release namespace when the TTL fires:
 
 ```bash
 helm ttl set my-release 30d --create-service-account \
-  --release-namespace staging --cronjob-namespace ops \
+  -n staging --cronjob-namespace ops \
   --delete-namespace
 ```
 

@@ -15,8 +15,8 @@ import (
 var version = "dev"
 
 // Factory types for dependency injection in tests.
-type configFactory func(namespace string) (*action.Configuration, error)
-type kubeClientFactory func() (kubernetes.Interface, error)
+type configFactory func(namespace string, opts ttl.KubeOptions) (*action.Configuration, error)
+type kubeClientFactory func(opts ttl.KubeOptions) (kubernetes.Interface, error)
 
 // Default factories use the real implementations.
 var (
@@ -24,15 +24,25 @@ var (
 	defaultKubeClientFactory kubeClientFactory = ttl.NewKubeClient
 )
 
-func main() {
-	if err := newRootCmd(defaultConfigFactory, defaultKubeClientFactory).Execute(); err != nil {
-		os.Exit(1)
+// globalFlags groups the persistent flags shared by all subcommands.
+type globalFlags struct {
+	namespace  string
+	kubeCtx    string
+	kubeconfig string
+	helmDriver string
+}
+
+func (gf *globalFlags) kubeOptions() ttl.KubeOptions {
+	return ttl.KubeOptions{
+		KubeContext: gf.kubeCtx,
+		Kubeconfig:  gf.kubeconfig,
+		Driver:      gf.helmDriver,
 	}
 }
 
-func getReleaseNamespace(override string) string {
-	if override != "" {
-		return override
+func (gf *globalFlags) getNamespace() string {
+	if gf.namespace != "" {
+		return gf.namespace
 	}
 
 	ns := os.Getenv("HELM_NAMESPACE")
@@ -43,8 +53,14 @@ func getReleaseNamespace(override string) string {
 	return ns
 }
 
+func main() {
+	if err := newRootCmd(defaultConfigFactory, defaultKubeClientFactory).Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
 func newRootCmd(cfgFactory configFactory, kubeFactory kubeClientFactory) *cobra.Command {
-	var releaseNamespace string
+	gf := &globalFlags{}
 
 	cmd := &cobra.Command{
 		Use:     "helm-ttl",
@@ -52,20 +68,23 @@ func newRootCmd(cfgFactory configFactory, kubeFactory kubeClientFactory) *cobra.
 		Version: version,
 	}
 
-	cmd.PersistentFlags().StringVar(&releaseNamespace, "release-namespace", "", "override the release namespace (default: HELM_NAMESPACE or \"default\")")
+	cmd.PersistentFlags().StringVarP(&gf.namespace, "namespace", "n", "", "override the release namespace (default: HELM_NAMESPACE or \"default\")")
+	cmd.PersistentFlags().StringVar(&gf.kubeCtx, "kube-context", "", "override the Kubernetes context (default: HELM_KUBECONTEXT)")
+	cmd.PersistentFlags().StringVar(&gf.kubeconfig, "kubeconfig", "", "path to kubeconfig file (default: KUBECONFIG)")
+	cmd.PersistentFlags().StringVar(&gf.helmDriver, "driver", "", "Helm storage driver (default: HELM_DRIVER or \"secrets\")")
 
 	cmd.AddCommand(
-		newSetCmd(cfgFactory, kubeFactory, &releaseNamespace),
-		newGetCmd(kubeFactory, &releaseNamespace),
-		newUnsetCmd(kubeFactory, &releaseNamespace),
-		newRunCmd(cfgFactory, kubeFactory, &releaseNamespace),
-		newCleanupRBACCmd(kubeFactory, &releaseNamespace),
+		newSetCmd(cfgFactory, kubeFactory, gf),
+		newGetCmd(kubeFactory, gf),
+		newUnsetCmd(kubeFactory, gf),
+		newRunCmd(cfgFactory, kubeFactory, gf),
+		newCleanupRBACCmd(kubeFactory, gf),
 	)
 
 	return cmd
 }
 
-func newSetCmd(cfgFactory configFactory, kubeFactory kubeClientFactory, releaseNsPtr *string) *cobra.Command {
+func newSetCmd(cfgFactory configFactory, kubeFactory kubeClientFactory, gf *globalFlags) *cobra.Command {
 	var (
 		serviceAccount       string
 		createServiceAccount bool
@@ -91,18 +110,18 @@ Duration supports:
 			releaseName := args[0]
 			duration := args[1]
 
-			releaseNs := getReleaseNamespace(*releaseNsPtr)
+			releaseNs := gf.getNamespace()
 			cjNs := cronjobNamespace
 			if cjNs == "" {
 				cjNs = releaseNs
 			}
 
-			cfg, err := cfgFactory(releaseNs)
+			cfg, err := cfgFactory(releaseNs, gf.kubeOptions())
 			if err != nil {
 				return fmt.Errorf("failed to create configuration: %w", err)
 			}
 
-			client, err := kubeFactory()
+			client, err := kubeFactory(gf.kubeOptions())
 			if err != nil {
 				return fmt.Errorf("failed to create kubernetes client: %w", err)
 			}
@@ -147,7 +166,7 @@ Duration supports:
 	return cmd
 }
 
-func newGetCmd(kubeFactory kubeClientFactory, releaseNsPtr *string) *cobra.Command {
+func newGetCmd(kubeFactory kubeClientFactory, gf *globalFlags) *cobra.Command {
 	var (
 		outputFormat     string
 		cronjobNamespace string
@@ -159,13 +178,13 @@ func newGetCmd(kubeFactory kubeClientFactory, releaseNsPtr *string) *cobra.Comma
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			releaseName := args[0]
-			releaseNs := getReleaseNamespace(*releaseNsPtr)
+			releaseNs := gf.getNamespace()
 			cjNs := cronjobNamespace
 			if cjNs == "" {
 				cjNs = releaseNs
 			}
 
-			client, err := kubeFactory()
+			client, err := kubeFactory(gf.kubeOptions())
 			if err != nil {
 				return fmt.Errorf("failed to create kubernetes client: %w", err)
 			}
@@ -197,7 +216,7 @@ func newGetCmd(kubeFactory kubeClientFactory, releaseNsPtr *string) *cobra.Comma
 	return cmd
 }
 
-func newUnsetCmd(kubeFactory kubeClientFactory, releaseNsPtr *string) *cobra.Command {
+func newUnsetCmd(kubeFactory kubeClientFactory, gf *globalFlags) *cobra.Command {
 	var cronjobNamespace string
 
 	cmd := &cobra.Command{
@@ -206,13 +225,13 @@ func newUnsetCmd(kubeFactory kubeClientFactory, releaseNsPtr *string) *cobra.Com
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			releaseName := args[0]
-			releaseNs := getReleaseNamespace(*releaseNsPtr)
+			releaseNs := gf.getNamespace()
 			cjNs := cronjobNamespace
 			if cjNs == "" {
 				cjNs = releaseNs
 			}
 
-			client, err := kubeFactory()
+			client, err := kubeFactory(gf.kubeOptions())
 			if err != nil {
 				return fmt.Errorf("failed to create kubernetes client: %w", err)
 			}
@@ -237,7 +256,7 @@ func newUnsetCmd(kubeFactory kubeClientFactory, releaseNsPtr *string) *cobra.Com
 	return cmd
 }
 
-func newRunCmd(cfgFactory configFactory, kubeFactory kubeClientFactory, releaseNsPtr *string) *cobra.Command {
+func newRunCmd(cfgFactory configFactory, kubeFactory kubeClientFactory, gf *globalFlags) *cobra.Command {
 	var cronjobNamespace string
 
 	cmd := &cobra.Command{
@@ -251,18 +270,18 @@ A TTL must already be set for the release (via helm ttl set).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			releaseName := args[0]
-			releaseNs := getReleaseNamespace(*releaseNsPtr)
+			releaseNs := gf.getNamespace()
 			cjNs := cronjobNamespace
 			if cjNs == "" {
 				cjNs = releaseNs
 			}
 
-			cfg, err := cfgFactory(releaseNs)
+			cfg, err := cfgFactory(releaseNs, gf.kubeOptions())
 			if err != nil {
 				return fmt.Errorf("failed to create configuration: %w", err)
 			}
 
-			client, err := kubeFactory()
+			client, err := kubeFactory(gf.kubeOptions())
 			if err != nil {
 				return fmt.Errorf("failed to create kubernetes client: %w", err)
 			}
@@ -296,7 +315,7 @@ A TTL must already be set for the release (via helm ttl set).`,
 	return cmd
 }
 
-func newCleanupRBACCmd(kubeFactory kubeClientFactory, releaseNsPtr *string) *cobra.Command {
+func newCleanupRBACCmd(kubeFactory kubeClientFactory, gf *globalFlags) *cobra.Command {
 	var (
 		dryRun        bool
 		allNamespaces bool
@@ -309,12 +328,12 @@ func newCleanupRBACCmd(kubeFactory kubeClientFactory, releaseNsPtr *string) *cob
 whose CronJobs have already fired or been deleted.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := kubeFactory()
+			client, err := kubeFactory(gf.kubeOptions())
 			if err != nil {
 				return fmt.Errorf("failed to create kubernetes client: %w", err)
 			}
 
-			releaseNs := getReleaseNamespace(*releaseNsPtr)
+			releaseNs := gf.getNamespace()
 			namespaces := []string{releaseNs}
 
 			ctx := context.Background()
