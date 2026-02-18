@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/josegonzalez/helm-ttl/pkg/ttl"
 	"github.com/spf13/cobra"
@@ -77,7 +78,7 @@ func newRootCmd(cfgFactory configFactory, kubeFactory kubeClientFactory) *cobra.
 		newSetCmd(cfgFactory, kubeFactory, gf),
 		newGetCmd(kubeFactory, gf),
 		newUnsetCmd(kubeFactory, gf),
-		newRunCmd(cfgFactory, kubeFactory, gf),
+		newRunCmd(kubeFactory, gf),
 		newCleanupRBACCmd(kubeFactory, gf),
 	)
 
@@ -256,15 +257,18 @@ func newUnsetCmd(kubeFactory kubeClientFactory, gf *globalFlags) *cobra.Command 
 	return cmd
 }
 
-func newRunCmd(cfgFactory configFactory, kubeFactory kubeClientFactory, gf *globalFlags) *cobra.Command {
-	var cronjobNamespace string
+func newRunCmd(kubeFactory kubeClientFactory, gf *globalFlags) *cobra.Command {
+	var (
+		cronjobNamespace string
+		timeout          time.Duration
+	)
 
 	cmd := &cobra.Command{
 		Use:   "run RELEASE",
 		Short: "Immediately run TTL for a Helm release",
-		Long: `Immediately execute the TTL action for a Helm release. This performs the
-same operations that the CronJob would: uninstall the release, optionally delete
-the namespace, delete the CronJob, and clean up RBAC resources.
+		Long: `Immediately execute the TTL action for a Helm release. Creates a Kubernetes
+Job from the CronJob's template, streams container logs, and checks exit codes.
+After execution, the CronJob and RBAC resources are cleaned up.
 
 A TTL must already be set for the release (via helm ttl set).`,
 		Args: cobra.ExactArgs(1),
@@ -276,34 +280,37 @@ A TTL must already be set for the release (via helm ttl set).`,
 				cjNs = releaseNs
 			}
 
-			cfg, err := cfgFactory(releaseNs, gf.kubeOptions())
-			if err != nil {
-				return fmt.Errorf("failed to create configuration: %w", err)
-			}
-
 			client, err := kubeFactory(gf.kubeOptions())
 			if err != nil {
 				return fmt.Errorf("failed to create kubernetes client: %w", err)
 			}
 
-			ctx := context.Background()
-			result, err := ttl.RunTTL(ctx, cfg, client, releaseName, releaseNs, cjNs)
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+
+			logFetcher := ttl.NewKubeLogFetcher(client)
+			w := cmd.OutOrStdout()
+
+			result, err := ttl.RunTTL(ctx, client, w, logFetcher, releaseName, releaseNs, cjNs)
 			if err != nil {
 				var notFound *ttl.TTLNotFoundError
 				if errors.As(err, &notFound) {
 					return fmt.Errorf("no TTL set for release %q in namespace %q", releaseName, releaseNs)
 				}
 
+				// Print container exit codes if available
+				if result != nil && result.JobFailed {
+					for _, cr := range result.ContainerResults {
+						_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Container %q exited with code %d\n", cr.Name, cr.ExitCode)
+					}
+				}
+
 				return err
 			}
 
-			if result.ReleaseNotFound {
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: release %q was not found (already uninstalled?)\n", releaseName)
-			}
-
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "TTL executed for release %q in namespace %q\n", releaseName, result.ReleaseNamespace)
+			_, _ = fmt.Fprintf(w, "TTL executed for release %q in namespace %q\n", releaseName, result.ReleaseNamespace)
 			if result.DeletedNamespace {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Namespace %q deleted\n", result.ReleaseNamespace)
+				_, _ = fmt.Fprintf(w, "Namespace %q deleted\n", result.ReleaseNamespace)
 			}
 
 			return nil
@@ -311,6 +318,7 @@ A TTL must already be set for the release (via helm ttl set).`,
 	}
 
 	cmd.Flags().StringVar(&cronjobNamespace, "cronjob-namespace", "", "namespace where the CronJob lives (default: release namespace)")
+	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "timeout for job execution")
 
 	return cmd
 }

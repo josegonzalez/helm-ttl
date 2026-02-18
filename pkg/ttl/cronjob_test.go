@@ -6,7 +6,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestParseImageFromDockerfile(t *testing.T) {
@@ -235,4 +237,124 @@ func TestBuildCronJob(t *testing.T) {
 		assert.Equal(t, int32(1), *cj.Spec.SuccessfulJobsHistoryLimit)
 		assert.Equal(t, int32(0), *cj.Spec.JobTemplate.Spec.BackoffLimit)
 	})
+}
+
+func TestBuildJobFromCronJob(t *testing.T) {
+	makeCronJob := func() *batchv1.CronJob {
+		cj, err := BuildCronJob(CronJobOptions{
+			ReleaseName:      "myapp",
+			ReleaseNamespace: "staging",
+			CronjobNamespace: "ops",
+			Schedule:         "0 12 1 1 *",
+			ServiceAccount:   "ttl-sa",
+			HelmImage:        "alpine/helm:3.14",
+			KubectlImage:     "alpine/k8s:1.29",
+		})
+		require.NoError(t, err)
+		return cj
+	}
+
+	t.Run("self-cleanup container replaced with no-op", func(t *testing.T) {
+		cj := makeCronJob()
+		job := BuildJobFromCronJob(cj, "myapp-staging-ttl-run")
+
+		containers := job.Spec.Template.Spec.Containers
+		require.Len(t, containers, 1)
+		assert.Equal(t, "self-cleanup", containers[0].Name)
+		assert.Equal(t, []string{"echo", "cleanup handled by helm-ttl run"}, containers[0].Command)
+	})
+
+	t.Run("labels copied plus triggered-by", func(t *testing.T) {
+		cj := makeCronJob()
+		job := BuildJobFromCronJob(cj, "myapp-staging-ttl-run")
+
+		assert.Equal(t, LabelManagedByValue, job.Labels[LabelManagedBy])
+		assert.Equal(t, "myapp", job.Labels[LabelRelease])
+		assert.Equal(t, "staging", job.Labels[LabelReleaseNamespace])
+		assert.Equal(t, "ops", job.Labels[LabelCronjobNamespace])
+		assert.Equal(t, "run", job.Labels[LabelTriggeredBy])
+	})
+
+	t.Run("init containers preserved", func(t *testing.T) {
+		cj := makeCronJob()
+		job := BuildJobFromCronJob(cj, "myapp-staging-ttl-run")
+
+		initContainers := job.Spec.Template.Spec.InitContainers
+		require.Len(t, initContainers, 1)
+		assert.Equal(t, "helm-uninstall", initContainers[0].Name)
+		assert.Equal(t, []string{"helm", "uninstall", "myapp", "--namespace", "staging"}, initContainers[0].Command)
+	})
+
+	t.Run("job name and namespace", func(t *testing.T) {
+		cj := makeCronJob()
+		job := BuildJobFromCronJob(cj, "myapp-staging-ttl-run")
+
+		assert.Equal(t, "myapp-staging-ttl-run", job.Name)
+		assert.Equal(t, "ops", job.Namespace)
+	})
+
+	t.Run("does not mutate original CronJob", func(t *testing.T) {
+		cj := makeCronJob()
+		origCmd := make([]string, len(cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Command))
+		copy(origCmd, cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Command)
+
+		_ = BuildJobFromCronJob(cj, "myapp-staging-ttl-run")
+
+		assert.Equal(t, origCmd, cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Command)
+	})
+
+	t.Run("with delete-namespace init containers", func(t *testing.T) {
+		cj, err := BuildCronJob(CronJobOptions{
+			ReleaseName:      "myapp",
+			ReleaseNamespace: "staging",
+			CronjobNamespace: "ops",
+			Schedule:         "0 12 1 1 *",
+			ServiceAccount:   "ttl-sa",
+			DeleteNamespace:  true,
+		})
+		require.NoError(t, err)
+
+		job := BuildJobFromCronJob(cj, "myapp-staging-ttl-run")
+
+		initContainers := job.Spec.Template.Spec.InitContainers
+		require.Len(t, initContainers, 2)
+		assert.Equal(t, "helm-uninstall", initContainers[0].Name)
+		assert.Equal(t, "delete-namespace", initContainers[1].Name)
+	})
+}
+
+func TestBuildJobFromCronJob_ManualCronJob(t *testing.T) {
+	// Test with a manually constructed CronJob to cover edge cases
+	cj := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cj",
+			Namespace: "default",
+			Labels: map[string]string{
+				LabelManagedBy: LabelManagedByValue,
+				LabelRelease:   "test",
+			},
+		},
+		Spec: batchv1.CronJobSpec{
+			JobTemplate: batchv1.JobTemplateSpec{
+				Spec: batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:    "not-self-cleanup",
+									Image:   "nginx:latest",
+									Command: []string{"nginx"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	job := BuildJobFromCronJob(cj, "test-run")
+
+	// Container that's not named self-cleanup should be unchanged
+	assert.Equal(t, []string{"nginx"}, job.Spec.Template.Spec.Containers[0].Command)
 }

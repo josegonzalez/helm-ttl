@@ -690,26 +690,55 @@ func TestRunCmd(t *testing.T) {
 	defer func() { _ = os.Setenv("HELM_NAMESPACE", origNs) }()
 	_ = os.Setenv("HELM_NAMESPACE", "default")
 
-	t.Run("run TTL happy path", func(t *testing.T) {
-		store := setupTestStore(t, "myapp", "default")
-		client := fake.NewClientset(&batchv1.CronJob{
+	buildCronJob := func(t *testing.T, releaseName, releaseNamespace, cronjobNamespace string) *batchv1.CronJob {
+		t.Helper()
+		cj, err := ttl.BuildCronJob(ttl.CronJobOptions{
+			ReleaseName:      releaseName,
+			ReleaseNamespace: releaseNamespace,
+			CronjobNamespace: cronjobNamespace,
+			Schedule:         "30 14 15 3 *",
+			ServiceAccount:   "default",
+			HelmImage:        "alpine/helm:3.14",
+			KubectlImage:     "alpine/k8s:1.29",
+		})
+		require.NoError(t, err)
+		return cj
+	}
+
+	completedPod := func(namespace, jobName string) *corev1.Pod {
+		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "myapp-default-ttl",
-				Namespace: "default",
-				Labels: map[string]string{
-					ttl.LabelManagedBy:        ttl.LabelManagedByValue,
-					ttl.LabelRelease:          "myapp",
-					ttl.LabelReleaseNamespace: "default",
-					ttl.LabelCronjobNamespace: "default",
-					ttl.LabelDeleteNamespace:  "false",
+				Name:      jobName + "-pod",
+				Namespace: namespace,
+				Labels:    map[string]string{"job-name": jobName},
+			},
+			Status: corev1.PodStatus{
+				InitContainerStatuses: []corev1.ContainerStatus{
+					{
+						Name: "helm-uninstall",
+						State: corev1.ContainerState{
+							Terminated: &corev1.ContainerStateTerminated{ExitCode: 0},
+						},
+					},
+				},
+				ContainerStatuses: []corev1.ContainerStatus{
+					{
+						Name: "self-cleanup",
+						State: corev1.ContainerState{
+							Terminated: &corev1.ContainerStateTerminated{ExitCode: 0},
+						},
+					},
 				},
 			},
-			Spec: batchv1.CronJobSpec{
-				Schedule: "30 14 15 3 *",
-			},
-		})
+		}
+	}
 
-		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+	t.Run("run TTL happy path", func(t *testing.T) {
+		cj := buildCronJob(t, "myapp", "default", "default")
+		pod := completedPod("default", "myapp-default-ttl-run")
+		client := fake.NewClientset(cj, pod)
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
@@ -727,10 +756,9 @@ func TestRunCmd(t *testing.T) {
 	})
 
 	t.Run("TTL not found", func(t *testing.T) {
-		store := setupTestStore(t, "myapp", "default")
 		client := fake.NewClientset()
 
-		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
@@ -741,24 +769,8 @@ func TestRunCmd(t *testing.T) {
 		assert.Contains(t, err.Error(), "no TTL set")
 	})
 
-	t.Run("config error", func(t *testing.T) {
-		client := fake.NewClientset()
-
-		cmd := newRootCmd(errorConfigFactory(), testKubeFactoryWithClient(client))
-		var buf bytes.Buffer
-		cmd.SetOut(&buf)
-		cmd.SetErr(&buf)
-		cmd.SetArgs([]string{"run", "myapp"})
-
-		err := cmd.Execute()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "configuration")
-	})
-
 	t.Run("kube client error", func(t *testing.T) {
-		store := setupTestStore(t, "myapp", "default")
-
-		cmd := newRootCmd(testConfigFactory(store), errorKubeFactory())
+		cmd := newRootCmd(defaultConfigFactory, errorKubeFactory())
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
@@ -780,25 +792,11 @@ func TestRunCmd(t *testing.T) {
 		_ = os.Setenv("HELM_NAMESPACE", "staging")
 		defer func() { _ = os.Setenv("HELM_NAMESPACE", "default") }()
 
-		store := setupTestStore(t, "myapp", "staging")
-		client := fake.NewClientset(&batchv1.CronJob{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "myapp-staging-ttl",
-				Namespace: "ops",
-				Labels: map[string]string{
-					ttl.LabelManagedBy:        ttl.LabelManagedByValue,
-					ttl.LabelRelease:          "myapp",
-					ttl.LabelReleaseNamespace: "staging",
-					ttl.LabelCronjobNamespace: "ops",
-					ttl.LabelDeleteNamespace:  "false",
-				},
-			},
-			Spec: batchv1.CronJobSpec{
-				Schedule: "0 12 1 1 *",
-			},
-		})
+		cj := buildCronJob(t, "myapp", "staging", "ops")
+		pod := completedPod("ops", "myapp-staging-ttl-run")
+		client := fake.NewClientset(cj, pod)
 
-		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
@@ -809,58 +807,12 @@ func TestRunCmd(t *testing.T) {
 		assert.Contains(t, buf.String(), "TTL executed")
 	})
 
-	t.Run("release already gone", func(t *testing.T) {
-		mem := driver.NewMemory()
-		store := storage.Init(mem)
-		client := fake.NewClientset(&batchv1.CronJob{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "myapp-default-ttl",
-				Namespace: "default",
-				Labels: map[string]string{
-					ttl.LabelManagedBy:        ttl.LabelManagedByValue,
-					ttl.LabelRelease:          "myapp",
-					ttl.LabelReleaseNamespace: "default",
-					ttl.LabelCronjobNamespace: "default",
-					ttl.LabelDeleteNamespace:  "false",
-				},
-			},
-			Spec: batchv1.CronJobSpec{
-				Schedule: "30 14 15 3 *",
-			},
-		})
-
-		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
-		var stdout, stderr bytes.Buffer
-		cmd.SetOut(&stdout)
-		cmd.SetErr(&stderr)
-		cmd.SetArgs([]string{"run", "myapp"})
-
-		err := cmd.Execute()
-		require.NoError(t, err)
-		assert.Contains(t, stderr.String(), "Warning")
-		assert.Contains(t, stdout.String(), "TTL executed")
-	})
-
 	t.Run("namespace flag overrides env", func(t *testing.T) {
-		store := setupTestStore(t, "myapp", "staging")
-		client := fake.NewClientset(&batchv1.CronJob{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "myapp-staging-ttl",
-				Namespace: "staging",
-				Labels: map[string]string{
-					ttl.LabelManagedBy:        ttl.LabelManagedByValue,
-					ttl.LabelRelease:          "myapp",
-					ttl.LabelReleaseNamespace: "staging",
-					ttl.LabelCronjobNamespace: "staging",
-					ttl.LabelDeleteNamespace:  "false",
-				},
-			},
-			Spec: batchv1.CronJobSpec{
-				Schedule: "30 14 15 3 *",
-			},
-		})
+		cj := buildCronJob(t, "myapp", "staging", "staging")
+		pod := completedPod("staging", "myapp-staging-ttl-run")
+		client := fake.NewClientset(cj, pod)
 
-		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
@@ -870,6 +822,62 @@ func TestRunCmd(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, buf.String(), "TTL executed")
 		assert.Contains(t, buf.String(), "staging")
+	})
+
+	t.Run("timeout flag", func(t *testing.T) {
+		cj := buildCronJob(t, "myapp", "default", "default")
+		pod := completedPod("default", "myapp-default-ttl-run")
+		client := fake.NewClientset(cj, pod)
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"run", "myapp", "--timeout", "10m"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "TTL executed")
+	})
+
+	t.Run("container failure prints exit codes", func(t *testing.T) {
+		cj := buildCronJob(t, "myapp", "default", "default")
+		failedPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-default-ttl-run-pod",
+				Namespace: "default",
+				Labels:    map[string]string{"job-name": "myapp-default-ttl-run"},
+			},
+			Status: corev1.PodStatus{
+				InitContainerStatuses: []corev1.ContainerStatus{
+					{
+						Name: "helm-uninstall",
+						State: corev1.ContainerState{
+							Terminated: &corev1.ContainerStateTerminated{ExitCode: 1},
+						},
+					},
+				},
+				ContainerStatuses: []corev1.ContainerStatus{
+					{
+						Name: "self-cleanup",
+						State: corev1.ContainerState{
+							Terminated: &corev1.ContainerStateTerminated{ExitCode: 0},
+						},
+					},
+				},
+			},
+		}
+		client := fake.NewClientset(cj, failedPod)
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"run", "myapp"})
+
+		err := cmd.Execute()
+		assert.Error(t, err)
+		assert.Contains(t, stderr.String(), "exited with code")
 	})
 }
 

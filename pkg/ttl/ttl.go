@@ -3,6 +3,7 @@ package ttl
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -199,18 +200,25 @@ func UnsetTTL(ctx context.Context, client kubernetes.Interface, releaseName, rel
 	return nil
 }
 
+// ContainerResult holds the exit information for a single container.
+type ContainerResult struct {
+	Name     string
+	ExitCode int32
+}
+
 // RunTTLResult contains the result of running a TTL action.
 type RunTTLResult struct {
 	ReleaseName      string
 	ReleaseNamespace string
-	ReleaseNotFound  bool
 	DeletedNamespace bool
+	JobFailed        bool
+	ContainerResults []ContainerResult
 }
 
-// RunTTL immediately executes the TTL action for a release.
-// It uninstalls the release, optionally deletes the namespace,
-// deletes the CronJob, and cleans up RBAC resources.
-func RunTTL(ctx context.Context, cfg *action.Configuration, client kubernetes.Interface, releaseName, releaseNamespace, cronjobNamespace string) (*RunTTLResult, error) {
+// RunTTL immediately executes the TTL action for a release by creating a
+// Kubernetes Job from the CronJob's template, streaming container logs,
+// and checking exit codes.
+func RunTTL(ctx context.Context, client kubernetes.Interface, w io.Writer, logFetcher LogFetcher, releaseName, releaseNamespace, cronjobNamespace string) (*RunTTLResult, error) {
 	resourceName, err := ResourceName(releaseName, releaseNamespace)
 	if err != nil {
 		return nil, err
@@ -233,20 +241,76 @@ func RunTTL(ctx context.Context, cfg *action.Configuration, client kubernetes.In
 		ReleaseNamespace: releaseNamespace,
 	}
 
-	// Uninstall the release if it exists
-	exists, _ := releaseExists(cfg, releaseName)
-	if exists {
-		uninstall := action.NewUninstall(cfg)
-		if _, err := uninstall.Run(releaseName); err != nil {
-			return nil, fmt.Errorf("failed to uninstall release: %w", err)
-		}
-	} else {
-		result.ReleaseNotFound = true
+	// Build and create the Job
+	jobName := resourceName + "-run"
+	job := BuildJobFromCronJob(cj, jobName)
+
+	_, err = client.BatchV1().Jobs(cronjobNamespace).Create(ctx, job, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Job: %w", err)
 	}
 
-	// Delete namespace if configured
+	// Watch pod and stream logs
+	var runErr error
+	func() {
+		podName, err := waitForPod(ctx, client, cronjobNamespace, jobName)
+		if err != nil {
+			runErr = err
+			return
+		}
+
+		// Process init containers, then main containers
+		spec := job.Spec.Template.Spec
+		allContainers := make([]string, 0, len(spec.InitContainers)+len(spec.Containers))
+		for _, c := range spec.InitContainers {
+			allContainers = append(allContainers, c.Name)
+		}
+		for _, c := range spec.Containers {
+			allContainers = append(allContainers, c.Name)
+		}
+
+		for _, containerName := range allContainers {
+			exitCode, err := waitForContainerTermination(ctx, client, cronjobNamespace, podName, containerName)
+			if err != nil {
+				runErr = err
+				return
+			}
+
+			_ = streamContainerLogs(ctx, logFetcher, w, cronjobNamespace, podName, containerName)
+
+			result.ContainerResults = append(result.ContainerResults, ContainerResult{
+				Name:     containerName,
+				ExitCode: exitCode,
+			})
+
+			if exitCode != 0 {
+				result.JobFailed = true
+			}
+		}
+	}()
+
+	// Cleanup always runs, even on failure
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Delete the Job (best-effort)
+	propagation := metav1.DeletePropagationBackground
+	_ = client.BatchV1().Jobs(cronjobNamespace).Delete(cleanupCtx, jobName, metav1.DeleteOptions{
+		PropagationPolicy: &propagation,
+	})
+
+	// Delete the CronJob
+	err = client.BatchV1().CronJobs(cronjobNamespace).Delete(cleanupCtx, resourceName, metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return nil, fmt.Errorf("failed to delete CronJob: %w", err)
+	}
+
+	// Clean up RBAC resources (best effort)
+	_ = CleanupRBAC(cleanupCtx, client, releaseName, releaseNamespace, cronjobNamespace)
+
+	// Handle namespace deletion
 	if deleteNamespace {
-		err := client.CoreV1().Namespaces().Delete(ctx, releaseNamespace, metav1.DeleteOptions{})
+		err := client.CoreV1().Namespaces().Delete(cleanupCtx, releaseNamespace, metav1.DeleteOptions{})
 		if err != nil && !errors.IsNotFound(err) {
 			return nil, fmt.Errorf("failed to delete namespace: %w", err)
 		}
@@ -254,26 +318,14 @@ func RunTTL(ctx context.Context, cfg *action.Configuration, client kubernetes.In
 		result.DeletedNamespace = true
 	}
 
-	// Delete the CronJob
-	err = client.BatchV1().CronJobs(cronjobNamespace).Delete(ctx, resourceName, metav1.DeleteOptions{})
-	if err != nil && !errors.IsNotFound(err) {
-		return nil, fmt.Errorf("failed to delete CronJob: %w", err)
+	if runErr != nil {
+		return result, runErr
 	}
 
-	// Clean up RBAC resources (best effort)
-	_ = CleanupRBAC(ctx, client, releaseName, releaseNamespace, cronjobNamespace)
+	if result.JobFailed {
+		return result, fmt.Errorf("job failed: one or more containers exited with non-zero status")
+	}
 
 	return result, nil
-}
-
-// releaseExists checks if a release exists using Helm storage.
-// This is used for validation before creating TTL resources.
-func releaseExists(cfg *action.Configuration, releaseName string) (bool, error) {
-	_, err := cfg.Releases.Last(releaseName)
-	if err != nil {
-		return false, nil
-	}
-
-	return true, nil
 }
 

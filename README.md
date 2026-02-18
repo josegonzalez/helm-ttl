@@ -157,7 +157,7 @@ helm ttl unset my-release -n staging --cronjob-namespace ops
 
 ### `helm ttl run RELEASE [flags]`
 
-Immediately execute the TTL action for a release. This performs the same operations that the CronJob would: uninstall the release, optionally delete the namespace, delete the CronJob, and clean up RBAC resources.
+Immediately execute the TTL action for a release. Creates a Kubernetes Job from the CronJob's template, streams container logs, and checks exit codes. This validates that the CronJob will work when it fires, and gives visibility into the execution. After execution, the CronJob and RBAC resources are cleaned up.
 
 A TTL must already be set for the release (via `helm ttl set`).
 
@@ -166,6 +166,7 @@ A TTL must already be set for the release (via `helm ttl set`).
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
 | `--cronjob-namespace` | release namespace | Namespace where the CronJob lives |
+| `--timeout` | `5m` | Timeout for job execution |
 
 **Examples:**
 
@@ -239,9 +240,18 @@ rules:
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
     verbs: ["get", "create", "update", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "delete"]
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "create", "update", "delete"]
@@ -256,9 +266,18 @@ rules:
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
     verbs: ["get", "create", "update", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "delete"]
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "create", "update", "delete"]
