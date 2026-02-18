@@ -199,6 +199,73 @@ func UnsetTTL(ctx context.Context, client kubernetes.Interface, releaseName, rel
 	return nil
 }
 
+// RunTTLResult contains the result of running a TTL action.
+type RunTTLResult struct {
+	ReleaseName      string
+	ReleaseNamespace string
+	ReleaseNotFound  bool
+	DeletedNamespace bool
+}
+
+// RunTTL immediately executes the TTL action for a release.
+// It uninstalls the release, optionally deletes the namespace,
+// deletes the CronJob, and cleans up RBAC resources.
+func RunTTL(ctx context.Context, cfg *action.Configuration, client kubernetes.Interface, releaseName, releaseNamespace, cronjobNamespace string) (*RunTTLResult, error) {
+	resourceName, err := ResourceName(releaseName, releaseNamespace)
+	if err != nil {
+		return nil, err
+	}
+
+	// Look up the CronJob to verify TTL exists and get configuration
+	cj, err := client.BatchV1().CronJobs(cronjobNamespace).Get(ctx, resourceName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil, &TTLNotFoundError{Name: releaseName}
+		}
+
+		return nil, fmt.Errorf("failed to get CronJob: %w", err)
+	}
+
+	deleteNamespace := cj.Labels[LabelDeleteNamespace] == "true"
+
+	result := &RunTTLResult{
+		ReleaseName:      releaseName,
+		ReleaseNamespace: releaseNamespace,
+	}
+
+	// Uninstall the release if it exists
+	exists, _ := releaseExists(cfg, releaseName)
+	if exists {
+		uninstall := action.NewUninstall(cfg)
+		if _, err := uninstall.Run(releaseName); err != nil {
+			return nil, fmt.Errorf("failed to uninstall release: %w", err)
+		}
+	} else {
+		result.ReleaseNotFound = true
+	}
+
+	// Delete namespace if configured
+	if deleteNamespace {
+		err := client.CoreV1().Namespaces().Delete(ctx, releaseNamespace, metav1.DeleteOptions{})
+		if err != nil && !errors.IsNotFound(err) {
+			return nil, fmt.Errorf("failed to delete namespace: %w", err)
+		}
+
+		result.DeletedNamespace = true
+	}
+
+	// Delete the CronJob
+	err = client.BatchV1().CronJobs(cronjobNamespace).Delete(ctx, resourceName, metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return nil, fmt.Errorf("failed to delete CronJob: %w", err)
+	}
+
+	// Clean up RBAC resources (best effort)
+	_ = CleanupRBAC(ctx, client, releaseName, releaseNamespace, cronjobNamespace)
+
+	return result, nil
+}
+
 // releaseExists checks if a release exists using Helm storage.
 // This is used for validation before creating TTL resources.
 func releaseExists(cfg *action.Configuration, releaseName string) (bool, error) {
