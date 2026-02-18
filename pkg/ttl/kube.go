@@ -12,14 +12,27 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+// KubeOptions holds CLI flag overrides for Kubernetes connection settings.
+type KubeOptions struct {
+	KubeContext string
+	Kubeconfig  string
+	Driver      string
+}
+
 // RESTClientGetter implements genericclioptions.RESTClientGetter interface
 type RESTClientGetter struct {
-	namespace string
+	namespace   string
+	kubeContext string
+	kubeconfig  string
 }
 
 // NewRESTClientGetter creates a new RESTClientGetter
-func NewRESTClientGetter(namespace string) *RESTClientGetter {
-	return &RESTClientGetter{namespace: namespace}
+func NewRESTClientGetter(namespace string, opts KubeOptions) *RESTClientGetter {
+	return &RESTClientGetter{
+		namespace:   namespace,
+		kubeContext: opts.KubeContext,
+		kubeconfig:  opts.Kubeconfig,
+	}
 }
 
 // ToRESTConfig returns a REST config
@@ -57,12 +70,20 @@ func (r *RESTClientGetter) ToRESTMapper() (meta.RESTMapper, error) {
 func (r *RESTClientGetter) ToRawKubeConfigLoader() clientcmd.ClientConfig {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 
-	if kubeconfig := os.Getenv("KUBECONFIG"); kubeconfig != "" {
+	kubeconfig := r.kubeconfig
+	if kubeconfig == "" {
+		kubeconfig = os.Getenv("KUBECONFIG")
+	}
+	if kubeconfig != "" {
 		loadingRules.ExplicitPath = kubeconfig
 	}
 
 	configOverrides := &clientcmd.ConfigOverrides{}
-	if context := os.Getenv("HELM_KUBECONTEXT"); context != "" {
+	context := r.kubeContext
+	if context == "" {
+		context = os.Getenv("HELM_KUBECONTEXT")
+	}
+	if context != "" {
 		configOverrides.CurrentContext = context
 	}
 	configOverrides.Context.Namespace = r.namespace
@@ -71,8 +92,8 @@ func (r *RESTClientGetter) ToRawKubeConfigLoader() clientcmd.ClientConfig {
 }
 
 // NewKubeClient creates a new Kubernetes clientset from the current kubeconfig.
-func NewKubeClient() (kubernetes.Interface, error) {
-	getter := NewRESTClientGetter("default")
+func NewKubeClient(opts KubeOptions) (kubernetes.Interface, error) {
+	getter := NewRESTClientGetter("default", opts)
 	config, err := getter.ToRESTConfig()
 	if err != nil {
 		return nil, err
