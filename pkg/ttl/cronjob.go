@@ -180,17 +180,8 @@ func BuildCronJob(opts CronJobOptions) (*batchv1.CronJob, error) {
 }
 
 // BuildJobFromCronJob creates a Job from a CronJob's job template.
-// The self-cleanup container command is replaced with a no-op so that
-// the CronJob is not deleted before the caller can clean up.
 func BuildJobFromCronJob(cj *batchv1.CronJob, jobName string) *batchv1.Job {
 	jobSpec := *cj.Spec.JobTemplate.Spec.DeepCopy()
-
-	// Replace self-cleanup container command with no-op
-	for i := range jobSpec.Template.Spec.Containers {
-		if jobSpec.Template.Spec.Containers[i].Name == "self-cleanup" {
-			jobSpec.Template.Spec.Containers[i].Command = []string{"echo", "cleanup handled by helm-ttl run"}
-		}
-	}
 
 	labels := make(map[string]string)
 	for k, v := range cj.Labels {

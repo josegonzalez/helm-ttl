@@ -299,12 +299,6 @@ func RunTTL(ctx context.Context, client kubernetes.Interface, w io.Writer, logFe
 		PropagationPolicy: &propagation,
 	})
 
-	// Delete the CronJob
-	err = client.BatchV1().CronJobs(cronjobNamespace).Delete(cleanupCtx, resourceName, metav1.DeleteOptions{})
-	if err != nil && !errors.IsNotFound(err) {
-		return nil, fmt.Errorf("failed to delete CronJob: %w", err)
-	}
-
 	// Clean up RBAC resources (best effort)
 	_ = CleanupRBAC(cleanupCtx, client, releaseName, releaseNamespace, cronjobNamespace)
 

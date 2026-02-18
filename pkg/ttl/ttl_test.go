@@ -674,10 +674,6 @@ func TestRunTTL(t *testing.T) {
 		assert.Equal(t, int32(0), result.ContainerResults[0].ExitCode)
 		assert.Equal(t, int32(0), result.ContainerResults[1].ExitCode)
 
-		// Verify CronJob is gone
-		_, err = client.BatchV1().CronJobs("default").Get(ctx, "myapp-default-ttl", metav1.GetOptions{})
-		assert.Error(t, err)
-
 		// Verify logs were streamed
 		assert.Contains(t, buf.String(), "==> Container: helm-uninstall <==")
 		assert.Contains(t, buf.String(), "==> Container: self-cleanup <==")
@@ -698,10 +694,6 @@ func TestRunTTL(t *testing.T) {
 		require.NotNil(t, result)
 		assert.True(t, result.JobFailed)
 		assert.Equal(t, int32(1), result.ContainerResults[0].ExitCode)
-
-		// CronJob should still be cleaned up even on failure
-		_, err = client.BatchV1().CronJobs("default").Get(ctx, "myapp-default-ttl", metav1.GetOptions{})
-		assert.Error(t, err)
 	})
 
 	t.Run("TTL not found", func(t *testing.T) {
@@ -743,10 +735,6 @@ func TestRunTTL(t *testing.T) {
 		assert.True(t, result.DeletedNamespace)
 		assert.Len(t, result.ContainerResults, 3)
 
-		// Verify CronJob is gone
-		_, err = client.BatchV1().CronJobs("ops").Get(ctx, "myapp-staging-ttl", metav1.GetOptions{})
-		assert.Error(t, err)
-
 		// Verify namespace is gone
 		_, err = client.CoreV1().Namespaces().Get(ctx, "staging", metav1.GetOptions{})
 		assert.Error(t, err)
@@ -773,24 +761,7 @@ func TestRunTTL(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to get CronJob")
 	})
 
-	t.Run("CronJob delete API error", func(t *testing.T) {
-		cj := buildTestCronJob(t, "myapp", "default", "default", false)
-		pod := buildCompletedPod("default", "myapp-default-ttl-run",
-			[]string{"helm-uninstall"}, []string{"self-cleanup"},
-			map[string]int32{"helm-uninstall": 0, "self-cleanup": 0})
-
-		client := fake.NewClientset(cj, pod)
-		client.PrependReactor("delete", "cronjobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
-			return true, nil, fmt.Errorf("simulated delete error")
-		})
-
-		var buf bytes.Buffer
-		_, err := RunTTL(ctx, client, &buf, testLogFetcher("ok\n"), "myapp", "default", "default")
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to delete CronJob")
-	})
-
-	t.Run("pod timeout still cleans up", func(t *testing.T) {
+	t.Run("pod timeout", func(t *testing.T) {
 		cj := buildTestCronJob(t, "myapp", "default", "default", false)
 		// No pod - will timeout
 		client := fake.NewClientset(cj)
@@ -803,9 +774,5 @@ func TestRunTTL(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "timed out waiting for pod")
 		require.NotNil(t, result)
-
-		// CronJob should still be cleaned up
-		_, err = client.BatchV1().CronJobs("default").Get(context.Background(), "myapp-default-ttl", metav1.GetOptions{})
-		assert.Error(t, err)
 	})
 }

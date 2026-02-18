@@ -254,14 +254,14 @@ func TestBuildJobFromCronJob(t *testing.T) {
 		return cj
 	}
 
-	t.Run("self-cleanup container replaced with no-op", func(t *testing.T) {
+	t.Run("self-cleanup container command preserved", func(t *testing.T) {
 		cj := makeCronJob()
 		job := BuildJobFromCronJob(cj, "myapp-staging-ttl-run")
 
 		containers := job.Spec.Template.Spec.Containers
 		require.Len(t, containers, 1)
 		assert.Equal(t, "self-cleanup", containers[0].Name)
-		assert.Equal(t, []string{"echo", "cleanup handled by helm-ttl run"}, containers[0].Command)
+		assert.Equal(t, []string{"kubectl", "delete", "cronjob", "myapp-staging-ttl", "--namespace", "ops"}, containers[0].Command)
 	})
 
 	t.Run("labels copied plus triggered-by", func(t *testing.T) {

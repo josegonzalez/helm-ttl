@@ -748,11 +748,6 @@ func TestRunCmd(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, buf.String(), "TTL executed")
 		assert.Contains(t, buf.String(), "myapp")
-
-		// Verify CronJob was deleted
-		ctx := context.Background()
-		_, err = client.BatchV1().CronJobs("default").Get(ctx, "myapp-default-ttl", metav1.GetOptions{})
-		assert.Error(t, err)
 	})
 
 	t.Run("TTL not found", func(t *testing.T) {
