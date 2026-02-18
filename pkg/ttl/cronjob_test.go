@@ -9,6 +9,45 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+func TestParseImageFromDockerfile(t *testing.T) {
+	t.Run("normal FROM line", func(t *testing.T) {
+		got := parseImageFromDockerfile("FROM alpine/helm:3.14\n")
+		assert.Equal(t, "alpine/helm:3.14", got)
+	})
+
+	t.Run("FROM with extra whitespace", func(t *testing.T) {
+		got := parseImageFromDockerfile("  FROM   alpine/k8s:1.29  \n")
+		assert.Equal(t, "alpine/k8s:1.29", got)
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		got := parseImageFromDockerfile("")
+		assert.Equal(t, "", got)
+	})
+
+	t.Run("lowercase from", func(t *testing.T) {
+		got := parseImageFromDockerfile("from nginx:latest\n")
+		assert.Equal(t, "nginx:latest", got)
+	})
+
+	t.Run("no FROM line", func(t *testing.T) {
+		got := parseImageFromDockerfile("RUN echo hello\n")
+		assert.Equal(t, "", got)
+	})
+}
+
+func TestEmbeddedDefaults(t *testing.T) {
+	t.Run("DefaultHelmImage is set", func(t *testing.T) {
+		assert.NotEmpty(t, DefaultHelmImage)
+		assert.Contains(t, DefaultHelmImage, "alpine/helm")
+	})
+
+	t.Run("DefaultKubectlImage is set", func(t *testing.T) {
+		assert.NotEmpty(t, DefaultKubectlImage)
+		assert.Contains(t, DefaultKubectlImage, "alpine/k8s")
+	})
+}
+
 func TestResourceName(t *testing.T) {
 	t.Run("basic name", func(t *testing.T) {
 		name, err := ResourceName("myapp", "staging")
