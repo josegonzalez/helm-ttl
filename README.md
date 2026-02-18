@@ -53,6 +53,15 @@ helm ttl run my-release
 # Execute TTL for a release with CronJob in a different namespace
 helm ttl run my-release --cronjob-namespace ops
 
+# Get TTL when the CronJob is in a different namespace than the release
+helm ttl get my-release --release-namespace staging --cronjob-namespace ops
+
+# Remove TTL when the CronJob is in a different namespace than the release
+helm ttl unset my-release --release-namespace staging --cronjob-namespace ops
+
+# Immediately execute TTL with cross-namespace setup
+helm ttl run my-release --release-namespace staging --cronjob-namespace ops
+
 # Clean up orphaned RBAC resources (dry run)
 helm ttl cleanup-rbac --dry-run
 
@@ -79,7 +88,7 @@ Set a TTL for a Helm release. Creates a CronJob that will uninstall the release 
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
 | `--service-account` | `default` | Service account for the CronJob |
-| `--create-service-account` | `false` | Create the service account and RBAC resources |
+| `--create-service-account` | `false` | Create the service account (in the CronJob namespace) and RBAC resources |
 | `--helm-image` | vendored | Helm container image |
 | `--kubectl-image` | vendored | kubectl container image |
 | `--cronjob-namespace` | release namespace | Namespace for the CronJob |
@@ -167,6 +176,8 @@ Use `--create-service-account` to automatically create the minimum required RBAC
 
 - Everything from cross-namespace, plus:
 - ClusterRole + ClusterRoleBinding (namespaces access)
+
+> The ServiceAccount is always created in the CronJob namespace, since that is where the CronJob pod runs.
 
 ### RBAC Cleanup
 
