@@ -71,6 +71,120 @@ func TestParseTimeInput(t *testing.T) {
 		assert.Contains(t, err.Error(), "positive")
 	})
 
+	t.Run("human duration - 6 hours", func(t *testing.T) {
+		result, err := ParseTimeInput("6 hours", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(6*time.Hour), result)
+	})
+
+	t.Run("human duration - 30 minutes", func(t *testing.T) {
+		result, err := ParseTimeInput("30 minutes", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(30*time.Minute), result)
+	})
+
+	t.Run("human duration - 3 days", func(t *testing.T) {
+		result, err := ParseTimeInput("3 days", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(3*24*time.Hour), result)
+	})
+
+	t.Run("human duration - 2 weeks", func(t *testing.T) {
+		result, err := ParseTimeInput("2 weeks", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(2*7*24*time.Hour), result)
+	})
+
+	t.Run("human duration - 90 seconds", func(t *testing.T) {
+		result, err := ParseTimeInput("90 seconds", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(90*time.Second), result)
+	})
+
+	t.Run("human duration - 1 hour singular", func(t *testing.T) {
+		result, err := ParseTimeInput("1 hour", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(1*time.Hour), result)
+	})
+
+	t.Run("human duration - 1 day singular", func(t *testing.T) {
+		result, err := ParseTimeInput("1 day", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(24*time.Hour), result)
+	})
+
+	t.Run("human duration - 1 week singular", func(t *testing.T) {
+		result, err := ParseTimeInput("1 week", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(7*24*time.Hour), result)
+	})
+
+	t.Run("human duration - 1 minute singular", func(t *testing.T) {
+		result, err := ParseTimeInput("1 minute", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(1*time.Minute), result)
+	})
+
+	t.Run("human duration - 1 second singular", func(t *testing.T) {
+		result, err := ParseTimeInput("1 second", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(1*time.Second), result)
+	})
+
+	t.Run("human duration - 30 secs abbreviation", func(t *testing.T) {
+		result, err := ParseTimeInput("30 secs", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(30*time.Second), result)
+	})
+
+	t.Run("human duration - 15 mins abbreviation", func(t *testing.T) {
+		result, err := ParseTimeInput("15 mins", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(15*time.Minute), result)
+	})
+
+	t.Run("human duration - 4 hrs abbreviation", func(t *testing.T) {
+		result, err := ParseTimeInput("4 hrs", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(4*time.Hour), result)
+	})
+
+	t.Run("human duration - 1 sec abbreviation", func(t *testing.T) {
+		result, err := ParseTimeInput("1 sec", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(1*time.Second), result)
+	})
+
+	t.Run("human duration - 1 min abbreviation", func(t *testing.T) {
+		result, err := ParseTimeInput("1 min", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(1*time.Minute), result)
+	})
+
+	t.Run("human duration - 1 hr abbreviation", func(t *testing.T) {
+		result, err := ParseTimeInput("1 hr", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(1*time.Hour), result)
+	})
+
+	t.Run("human duration - 0 hours rejected", func(t *testing.T) {
+		_, err := ParseTimeInput("0 hours", now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "positive")
+	})
+
+	t.Run("human duration - 50 weeks exceeds max", func(t *testing.T) {
+		_, err := ParseTimeInput("50 weeks", now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "maximum")
+	})
+
+	t.Run("human duration - multiple spaces", func(t *testing.T) {
+		result, err := ParseTimeInput("6  hours", now)
+		require.NoError(t, err)
+		assert.Equal(t, now.Add(6*time.Hour), result)
+	})
+
 	t.Run("natural language - tomorrow", func(t *testing.T) {
 		result, err := ParseTimeInput("tomorrow", now)
 		require.NoError(t, err)

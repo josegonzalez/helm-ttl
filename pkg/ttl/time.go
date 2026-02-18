@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tj/go-naturaldate"
 )
 
 var daysPattern = regexp.MustCompile(`^(\d+)d$`)
+var humanDurationPattern = regexp.MustCompile(`^(\d+)\s+(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)$`)
 
 // maxTTLDuration is the maximum TTL (~11 months) since cron has no year field.
 const maxTTLDuration = 11 * 30 * 24 * time.Hour
@@ -18,7 +20,8 @@ const maxTTLDuration = 11 * 30 * 24 * time.Hour
 // It tries these formats in order:
 // 1. Go durations: 30m, 2h, 2h30m, 24h, 168h
 // 2. Days shorthand: 7d, 30d
-// 3. Natural language: tomorrow, next monday, in 2 hours
+// 3. Human-readable durations: 6 hours, 3 days, 2 weeks, 30 mins
+// 4. Natural language: tomorrow, next monday, in 2 hours
 func ParseTimeInput(input string, now time.Time) (time.Time, error) {
 	// Try Go duration
 	if d, err := time.ParseDuration(input); err == nil {
@@ -53,6 +56,26 @@ func ParseTimeInput(input string, now time.Time) (time.Time, error) {
 		return target, nil
 	}
 
+	// Try human-readable duration (e.g., "6 hours", "3 days", "2 weeks")
+	if matches := humanDurationPattern.FindStringSubmatch(input); matches != nil {
+		value, err := strconv.Atoi(matches[1])
+		if err != nil {
+			return time.Time{}, fmt.Errorf("invalid duration value: %s", matches[1])
+		}
+
+		if value <= 0 {
+			return time.Time{}, fmt.Errorf("duration must be positive, got %d %s", value, matches[2])
+		}
+
+		unit := parseHumanDurationUnit(matches[2])
+		target := now.Add(time.Duration(value) * unit)
+		if target.Sub(now) > maxTTLDuration {
+			return time.Time{}, fmt.Errorf("TTL exceeds maximum of ~11 months")
+		}
+
+		return target, nil
+	}
+
 	// Try natural language
 	target, err := naturaldate.Parse(input, now)
 	if err != nil {
@@ -68,6 +91,24 @@ func ParseTimeInput(input string, now time.Time) (time.Time, error) {
 	}
 
 	return target, nil
+}
+
+// parseHumanDurationUnit maps a human-readable unit word to a time.Duration.
+func parseHumanDurationUnit(unit string) time.Duration {
+	switch {
+	case strings.HasPrefix(unit, "sec"):
+		return time.Second
+	case strings.HasPrefix(unit, "min"):
+		return time.Minute
+	case strings.HasPrefix(unit, "hour"), strings.HasPrefix(unit, "hr"):
+		return time.Hour
+	case strings.HasPrefix(unit, "day"):
+		return 24 * time.Hour
+	case strings.HasPrefix(unit, "week"):
+		return 7 * 24 * time.Hour
+	default:
+		return time.Second
+	}
 }
 
 // TimeToCronSchedule converts an absolute time to a cron schedule string.
