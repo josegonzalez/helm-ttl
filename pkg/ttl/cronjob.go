@@ -29,6 +29,8 @@ const (
 	LabelCronjobNamespace = "helm-ttl/cronjob-namespace"
 	// LabelDeleteNamespace indicates whether the namespace should be deleted.
 	LabelDeleteNamespace = "helm-ttl/delete-namespace"
+	// LabelTriggeredBy indicates how the Job was triggered.
+	LabelTriggeredBy = "helm-ttl/triggered-by"
 
 	// maxResourceNameLen is the max length for CronJob names.
 	// CronJob creates Jobs with a suffix, and Jobs create Pods with a suffix.
@@ -175,4 +177,24 @@ func BuildCronJob(opts CronJobOptions) (*batchv1.CronJob, error) {
 	}
 
 	return cronjob, nil
+}
+
+// BuildJobFromCronJob creates a Job from a CronJob's job template.
+func BuildJobFromCronJob(cj *batchv1.CronJob, jobName string) *batchv1.Job {
+	jobSpec := *cj.Spec.JobTemplate.Spec.DeepCopy()
+
+	labels := make(map[string]string)
+	for k, v := range cj.Labels {
+		labels[k] = v
+	}
+	labels[LabelTriggeredBy] = "run"
+
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: cj.Namespace,
+			Labels:    labels,
+		},
+		Spec: jobSpec,
+	}
 }
