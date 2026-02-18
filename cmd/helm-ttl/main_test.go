@@ -712,6 +712,14 @@ func TestRunCmd(t *testing.T) {
 				Namespace: namespace,
 				Labels:    map[string]string{"job-name": jobName},
 			},
+			Spec: corev1.PodSpec{
+				InitContainers: []corev1.Container{
+					{Name: "helm-uninstall"},
+				},
+				Containers: []corev1.Container{
+					{Name: "self-cleanup"},
+				},
+			},
 			Status: corev1.PodStatus{
 				InitContainerStatuses: []corev1.ContainerStatus{
 					{
@@ -842,6 +850,14 @@ func TestRunCmd(t *testing.T) {
 				Name:      "myapp-default-ttl-run-pod",
 				Namespace: "default",
 				Labels:    map[string]string{"job-name": "myapp-default-ttl-run"},
+			},
+			Spec: corev1.PodSpec{
+				InitContainers: []corev1.Container{
+					{Name: "helm-uninstall"},
+				},
+				Containers: []corev1.Container{
+					{Name: "self-cleanup"},
+				},
 			},
 			Status: corev1.PodStatus{
 				InitContainerStatuses: []corev1.ContainerStatus{

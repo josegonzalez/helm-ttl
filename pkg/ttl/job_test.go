@@ -26,9 +26,9 @@ func TestWaitForPod(t *testing.T) {
 		})
 
 		ctx := context.Background()
-		podName, err := waitForPod(ctx, client, "default", "test-job")
+		pod, err := waitForPod(ctx, client, "default", "test-job")
 		require.NoError(t, err)
-		assert.Equal(t, "test-pod", podName)
+		assert.Equal(t, "test-pod", pod.Name)
 	})
 
 	t.Run("context cancelled", func(t *testing.T) {

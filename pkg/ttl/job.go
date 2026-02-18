@@ -25,23 +25,23 @@ func NewKubeLogFetcher(client kubernetes.Interface) LogFetcher {
 }
 
 // waitForPod polls until a pod owned by the given job appears.
-func waitForPod(ctx context.Context, client kubernetes.Interface, namespace, jobName string) (string, error) {
+func waitForPod(ctx context.Context, client kubernetes.Interface, namespace, jobName string) (*corev1.Pod, error) {
 	labelSelector := fmt.Sprintf("job-name=%s", jobName)
 	for {
 		pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: labelSelector,
 		})
 		if err != nil {
-			return "", fmt.Errorf("failed to list pods: %w", err)
+			return nil, fmt.Errorf("failed to list pods: %w", err)
 		}
 
 		if len(pods.Items) > 0 {
-			return pods.Items[0].Name, nil
+			return &pods.Items[0], nil
 		}
 
 		select {
 		case <-ctx.Done():
-			return "", fmt.Errorf("timed out waiting for pod (job %s): %w", jobName, ctx.Err())
+			return nil, fmt.Errorf("timed out waiting for pod (job %s): %w", jobName, ctx.Err())
 		case <-time.After(1 * time.Second):
 		}
 	}

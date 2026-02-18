@@ -253,30 +253,30 @@ func RunTTL(ctx context.Context, client kubernetes.Interface, w io.Writer, logFe
 	// Watch pod and stream logs
 	var runErr error
 	func() {
-		podName, err := waitForPod(ctx, client, cronjobNamespace, jobName)
+		pod, err := waitForPod(ctx, client, cronjobNamespace, jobName)
 		if err != nil {
 			runErr = err
 			return
 		}
 
-		// Process init containers, then main containers
-		spec := job.Spec.Template.Spec
-		allContainers := make([]string, 0, len(spec.InitContainers)+len(spec.Containers))
-		for _, c := range spec.InitContainers {
+		// Process init containers, then main containers from the actual pod
+		// so we capture any injected sidecars
+		allContainers := make([]string, 0, len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
+		for _, c := range pod.Spec.InitContainers {
 			allContainers = append(allContainers, c.Name)
 		}
-		for _, c := range spec.Containers {
+		for _, c := range pod.Spec.Containers {
 			allContainers = append(allContainers, c.Name)
 		}
 
 		for _, containerName := range allContainers {
-			exitCode, err := waitForContainerTermination(ctx, client, cronjobNamespace, podName, containerName)
+			exitCode, err := waitForContainerTermination(ctx, client, cronjobNamespace, pod.Name, containerName)
 			if err != nil {
 				runErr = err
 				return
 			}
 
-			_ = streamContainerLogs(ctx, logFetcher, w, cronjobNamespace, podName, containerName)
+			_ = streamContainerLogs(ctx, logFetcher, w, cronjobNamespace, pod.Name, containerName)
 
 			result.ContainerResults = append(result.ContainerResults, ContainerResult{
 				Name:     containerName,

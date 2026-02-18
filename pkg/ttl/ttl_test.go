@@ -613,9 +613,11 @@ func buildTestCronJob(t *testing.T, releaseName, releaseNamespace, cronjobNamesp
 
 // buildCompletedPod creates a Pod that looks like a completed Job pod.
 func buildCompletedPod(namespace, jobName string, initContainerNames []string, containerNames []string, exitCodes map[string]int32) *corev1.Pod {
+	var initContainers []corev1.Container
 	var initStatuses []corev1.ContainerStatus
 	for _, name := range initContainerNames {
 		code := exitCodes[name]
+		initContainers = append(initContainers, corev1.Container{Name: name})
 		initStatuses = append(initStatuses, corev1.ContainerStatus{
 			Name: name,
 			State: corev1.ContainerState{
@@ -626,9 +628,11 @@ func buildCompletedPod(namespace, jobName string, initContainerNames []string, c
 		})
 	}
 
+	var containers []corev1.Container
 	var containerStatuses []corev1.ContainerStatus
 	for _, name := range containerNames {
 		code := exitCodes[name]
+		containers = append(containers, corev1.Container{Name: name})
 		containerStatuses = append(containerStatuses, corev1.ContainerStatus{
 			Name: name,
 			State: corev1.ContainerState{
@@ -644,6 +648,10 @@ func buildCompletedPod(namespace, jobName string, initContainerNames []string, c
 			Name:      jobName + "-pod",
 			Namespace: namespace,
 			Labels:    map[string]string{"job-name": jobName},
+		},
+		Spec: corev1.PodSpec{
+			InitContainers: initContainers,
+			Containers:     containers,
 		},
 		Status: corev1.PodStatus{
 			InitContainerStatuses: initStatuses,
