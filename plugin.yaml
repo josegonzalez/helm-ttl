@@ -1,5 +1,5 @@
 name: "ttl"
-version: "0.1.0"
+version: "0.0.0"
 usage: "helm ttl [set|get|unset|cleanup-rbac] [args]"
 description: "Manage TTL (time-to-live) for Helm releases"
 ignoreFlags: false
