@@ -1,12 +1,20 @@
 package ttl
 
 import (
+	_ "embed"
 	"fmt"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+//go:embed dockerfiles/helm/Dockerfile
+var helmDockerfile string
+
+//go:embed dockerfiles/kubectl/Dockerfile
+var kubectlDockerfile string
 
 const (
 	// LabelManagedBy is the standard Kubernetes label for resource management.
@@ -27,12 +35,25 @@ const (
 	// CronJob name + "-" + 10-char timestamp = Job name (max 63 chars)
 	// We limit CronJob names to 52 chars to be safe.
 	maxResourceNameLen = 52
-
-	// DefaultHelmImage is the default Helm container image.
-	DefaultHelmImage = "alpine/helm:latest"
-	// DefaultKubectlImage is the default kubectl container image.
-	DefaultKubectlImage = "alpine/k8s:latest"
 )
+
+// DefaultHelmImage is the default Helm container image, parsed from the embedded Dockerfile.
+var DefaultHelmImage = parseImageFromDockerfile(helmDockerfile)
+
+// DefaultKubectlImage is the default kubectl container image, parsed from the embedded Dockerfile.
+var DefaultKubectlImage = parseImageFromDockerfile(kubectlDockerfile)
+
+// parseImageFromDockerfile extracts the image reference from a Dockerfile's FROM line.
+func parseImageFromDockerfile(dockerfile string) string {
+	for _, line := range strings.Split(dockerfile, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToUpper(line), "FROM ") {
+			return strings.TrimSpace(line[5:])
+		}
+	}
+
+	return ""
+}
 
 // ResourceName returns the standard resource name for a release TTL.
 // Format: <release>-<releaseNamespace>-ttl

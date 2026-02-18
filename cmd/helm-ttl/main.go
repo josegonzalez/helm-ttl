@@ -129,8 +129,8 @@ Duration supports:
 
 	cmd.Flags().StringVar(&serviceAccount, "service-account", "default", "service account for CronJob")
 	cmd.Flags().BoolVar(&createServiceAccount, "create-service-account", false, "create the service account and RBAC resources")
-	cmd.Flags().StringVar(&helmImage, "helm-image", "", "Helm container image (default: alpine/helm:latest)")
-	cmd.Flags().StringVar(&kubectlImage, "kubectl-image", "", "kubectl container image (default: alpine/k8s:latest)")
+	cmd.Flags().StringVar(&helmImage, "helm-image", "", "Helm container image (default: "+ttl.DefaultHelmImage+")")
+	cmd.Flags().StringVar(&kubectlImage, "kubectl-image", "", "kubectl container image (default: "+ttl.DefaultKubectlImage+")")
 	cmd.Flags().StringVar(&cronjobNamespace, "cronjob-namespace", "", "namespace for the CronJob (default: release namespace)")
 	cmd.Flags().BoolVar(&deleteNamespace, "delete-namespace", false, "also delete the release namespace after uninstalling")
 

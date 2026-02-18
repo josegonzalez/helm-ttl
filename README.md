@@ -60,8 +60,8 @@ Set a TTL for a Helm release. Creates a CronJob that will uninstall the release 
 | ---- | ------- | ----------- |
 | `--service-account` | `default` | Service account for the CronJob |
 | `--create-service-account` | `false` | Create the service account and RBAC resources |
-| `--helm-image` | `alpine/helm:latest` | Helm container image |
-| `--kubectl-image` | `alpine/k8s:latest` | kubectl container image |
+| `--helm-image` | vendored | Helm container image |
+| `--kubectl-image` | vendored | kubectl container image |
 | `--cronjob-namespace` | release namespace | Namespace for the CronJob |
 | `--delete-namespace` | `false` | Also delete the release namespace after uninstalling |
 
