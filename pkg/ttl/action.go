@@ -7,11 +7,14 @@ import (
 )
 
 // NewConfiguration creates a new Helm action configuration.
-// It reads configuration from environment variables set by Helm.
-func NewConfiguration() (*action.Configuration, error) {
+// When namespace is non-empty it is used directly; otherwise the
+// value falls back to the HELM_NAMESPACE env var or "default".
+func NewConfiguration(namespace string) (*action.Configuration, error) {
 	cfg := new(action.Configuration)
 
-	namespace := os.Getenv("HELM_NAMESPACE")
+	if namespace == "" {
+		namespace = os.Getenv("HELM_NAMESPACE")
+	}
 	if namespace == "" {
 		namespace = "default"
 	}
