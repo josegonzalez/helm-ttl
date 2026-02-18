@@ -52,7 +52,7 @@ func setupTestStore(t *testing.T, releaseName, namespace string) *storage.Storag
 }
 
 func testConfigFactory(store *storage.Storage) configFactory {
-	return func() (*action.Configuration, error) {
+	return func(_ string) (*action.Configuration, error) {
 		return &action.Configuration{
 			Releases:   store,
 			KubeClient: &kubefake.PrintingKubeClient{Out: io.Discard},
@@ -68,7 +68,7 @@ func testKubeFactoryWithClient(client kubernetes.Interface) kubeClientFactory {
 }
 
 func errorConfigFactory() configFactory {
-	return func() (*action.Configuration, error) {
+	return func(_ string) (*action.Configuration, error) {
 		return nil, errors.New("config error")
 	}
 }
@@ -96,6 +96,11 @@ func TestNewRootCmd(t *testing.T) {
 	assert.Contains(t, names, "unset")
 	assert.Contains(t, names, "run")
 	assert.Contains(t, names, "cleanup-rbac")
+
+	// Should have --release-namespace persistent flag
+	f := cmd.PersistentFlags().Lookup("release-namespace")
+	require.NotNil(t, f)
+	assert.Equal(t, "", f.DefValue)
 }
 
 func TestSetCmd(t *testing.T) {
@@ -245,6 +250,26 @@ func TestSetCmd(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "custom/helm:v3", cj.Spec.JobTemplate.Spec.Template.Spec.InitContainers[0].Image)
 		assert.Equal(t, "custom/kubectl:v1", cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Image)
+	})
+
+	t.Run("release-namespace flag overrides env", func(t *testing.T) {
+		store := setupTestStore(t, "myapp", "staging")
+		client := fake.NewClientset()
+
+		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"set", "myapp", "24h", "--create-service-account", "--release-namespace", "staging"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "staging")
+
+		ctx := context.Background()
+		cj, err := client.BatchV1().CronJobs("staging").Get(ctx, "myapp-staging-ttl", metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, "myapp-staging-ttl", cj.Name)
 	})
 }
 
@@ -399,6 +424,35 @@ func TestGetCmd(t *testing.T) {
 		assert.Contains(t, buf.String(), "staging")
 		assert.Contains(t, buf.String(), "ops")
 	})
+
+	t.Run("release-namespace flag overrides env", func(t *testing.T) {
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-staging-ttl",
+				Namespace: "staging",
+				Labels: map[string]string{
+					ttl.LabelManagedBy:        ttl.LabelManagedByValue,
+					ttl.LabelRelease:          "myapp",
+					ttl.LabelReleaseNamespace: "staging",
+					ttl.LabelCronjobNamespace: "staging",
+					ttl.LabelDeleteNamespace:  "false",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "30 14 15 3 *",
+			},
+		})
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"get", "myapp", "--release-namespace", "staging"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "staging")
+	})
 }
 
 func TestUnsetCmd(t *testing.T) {
@@ -456,6 +510,33 @@ func TestUnsetCmd(t *testing.T) {
 		err := cmd.Execute()
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "kubernetes client")
+	})
+
+	t.Run("release-namespace flag overrides env", func(t *testing.T) {
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-staging-ttl",
+				Namespace: "staging",
+				Labels: map[string]string{
+					ttl.LabelManagedBy: ttl.LabelManagedByValue,
+					ttl.LabelRelease:   "myapp",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "30 14 15 6 *",
+			},
+		})
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"unset", "myapp", "--release-namespace", "staging"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "TTL removed")
+		assert.Contains(t, buf.String(), "staging")
 	})
 }
 
@@ -545,6 +626,31 @@ func TestCleanupRBACCmd(t *testing.T) {
 		cmd.SetArgs([]string{"cleanup-rbac", "extra"})
 		err := cmd.Execute()
 		assert.Error(t, err)
+	})
+
+	t.Run("release-namespace flag overrides env", func(t *testing.T) {
+		labels := map[string]string{
+			ttl.LabelManagedBy:        ttl.LabelManagedByValue,
+			ttl.LabelRelease:          "myapp",
+			ttl.LabelReleaseNamespace: "staging",
+			ttl.LabelCronjobNamespace: "staging",
+		}
+
+		client := fake.NewClientset(
+			&corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{Name: "myapp-staging-ttl", Namespace: "staging", Labels: labels},
+			},
+		)
+
+		cmd := newRootCmd(defaultConfigFactory, testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"cleanup-rbac", "--release-namespace", "staging"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "Deleted")
 	})
 }
 
@@ -703,6 +809,37 @@ func TestRunCmd(t *testing.T) {
 		assert.Contains(t, stderr.String(), "Warning")
 		assert.Contains(t, stdout.String(), "TTL executed")
 	})
+
+	t.Run("release-namespace flag overrides env", func(t *testing.T) {
+		store := setupTestStore(t, "myapp", "staging")
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-staging-ttl",
+				Namespace: "staging",
+				Labels: map[string]string{
+					ttl.LabelManagedBy:        ttl.LabelManagedByValue,
+					ttl.LabelRelease:          "myapp",
+					ttl.LabelReleaseNamespace: "staging",
+					ttl.LabelCronjobNamespace: "staging",
+					ttl.LabelDeleteNamespace:  "false",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "30 14 15 3 *",
+			},
+		})
+
+		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"run", "myapp", "--release-namespace", "staging"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "TTL executed")
+		assert.Contains(t, buf.String(), "staging")
+	})
 }
 
 func TestGetReleaseNamespace(t *testing.T) {
@@ -711,16 +848,26 @@ func TestGetReleaseNamespace(t *testing.T) {
 
 	t.Run("with HELM_NAMESPACE set", func(t *testing.T) {
 		_ = os.Setenv("HELM_NAMESPACE", "custom-ns")
-		assert.Equal(t, "custom-ns", getReleaseNamespace())
+		assert.Equal(t, "custom-ns", getReleaseNamespace(""))
 	})
 
 	t.Run("with HELM_NAMESPACE empty", func(t *testing.T) {
 		_ = os.Setenv("HELM_NAMESPACE", "")
-		assert.Equal(t, "default", getReleaseNamespace())
+		assert.Equal(t, "default", getReleaseNamespace(""))
 	})
 
 	t.Run("with HELM_NAMESPACE unset", func(t *testing.T) {
 		_ = os.Unsetenv("HELM_NAMESPACE")
-		assert.Equal(t, "default", getReleaseNamespace())
+		assert.Equal(t, "default", getReleaseNamespace(""))
+	})
+
+	t.Run("override takes precedence over HELM_NAMESPACE", func(t *testing.T) {
+		_ = os.Setenv("HELM_NAMESPACE", "from-env")
+		assert.Equal(t, "from-flag", getReleaseNamespace("from-flag"))
+	})
+
+	t.Run("override takes precedence over default", func(t *testing.T) {
+		_ = os.Unsetenv("HELM_NAMESPACE")
+		assert.Equal(t, "explicit", getReleaseNamespace("explicit"))
 	})
 }

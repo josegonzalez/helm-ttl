@@ -22,7 +22,7 @@ func TestNewConfiguration_EnvironmentVariables(t *testing.T) {
 		_ = os.Unsetenv("HELM_NAMESPACE")
 		_ = os.Unsetenv("HELM_DRIVER")
 
-		cfg, err := NewConfiguration()
+		cfg, err := NewConfiguration("")
 		require.NoError(t, err)
 		assert.NotNil(t, cfg)
 	})
@@ -30,7 +30,7 @@ func TestNewConfiguration_EnvironmentVariables(t *testing.T) {
 	t.Run("with HELM_NAMESPACE set", func(t *testing.T) {
 		_ = os.Setenv("HELM_NAMESPACE", "custom-namespace")
 
-		cfg, err := NewConfiguration()
+		cfg, err := NewConfiguration("")
 		require.NoError(t, err)
 		assert.NotNil(t, cfg)
 	})
@@ -38,7 +38,7 @@ func TestNewConfiguration_EnvironmentVariables(t *testing.T) {
 	t.Run("with HELM_DRIVER set to memory", func(t *testing.T) {
 		_ = os.Setenv("HELM_DRIVER", "memory")
 
-		cfg, err := NewConfiguration()
+		cfg, err := NewConfiguration("")
 		require.NoError(t, err)
 		assert.NotNil(t, cfg)
 	})
@@ -46,7 +46,7 @@ func TestNewConfiguration_EnvironmentVariables(t *testing.T) {
 	t.Run("with empty HELM_NAMESPACE defaults to 'default'", func(t *testing.T) {
 		_ = os.Setenv("HELM_NAMESPACE", "")
 
-		cfg, err := NewConfiguration()
+		cfg, err := NewConfiguration("")
 		require.NoError(t, err)
 		assert.NotNil(t, cfg)
 	})
@@ -54,7 +54,7 @@ func TestNewConfiguration_EnvironmentVariables(t *testing.T) {
 	t.Run("with empty HELM_DRIVER defaults to 'secrets'", func(t *testing.T) {
 		_ = os.Setenv("HELM_DRIVER", "")
 
-		cfg, err := NewConfiguration()
+		cfg, err := NewConfiguration("")
 		require.NoError(t, err)
 		assert.NotNil(t, cfg)
 	})
@@ -62,7 +62,16 @@ func TestNewConfiguration_EnvironmentVariables(t *testing.T) {
 	t.Run("with invalid HELM_DRIVER returns error", func(t *testing.T) {
 		_ = os.Setenv("HELM_DRIVER", "invalid-driver-that-does-not-exist")
 
-		_, err := NewConfiguration()
+		_, err := NewConfiguration("")
 		assert.Error(t, err)
+	})
+
+	t.Run("explicit namespace overrides HELM_NAMESPACE", func(t *testing.T) {
+		_ = os.Setenv("HELM_NAMESPACE", "env-namespace")
+		_ = os.Setenv("HELM_DRIVER", "memory")
+
+		cfg, err := NewConfiguration("explicit-ns")
+		require.NoError(t, err)
+		assert.NotNil(t, cfg)
 	})
 }

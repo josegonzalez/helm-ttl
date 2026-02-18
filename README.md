@@ -23,6 +23,9 @@ helm ttl set my-release "next monday" --create-service-account
 # Set TTL with custom service account
 helm ttl set my-release 2h --service-account my-sa
 
+# Set TTL targeting a specific release namespace
+helm ttl set my-release 24h --create-service-account --release-namespace staging
+
 # Set TTL in a different namespace for the CronJob
 helm ttl set my-release 7d --create-service-account --cronjob-namespace ops
 
@@ -31,6 +34,9 @@ helm ttl set my-release 30d --create-service-account --cronjob-namespace ops --d
 
 # Get the current TTL for a release
 helm ttl get my-release
+
+# Get TTL for a release in a specific namespace
+helm ttl get my-release --release-namespace staging
 
 # Get TTL in JSON format
 helm ttl get my-release -o json
@@ -53,6 +59,14 @@ helm ttl cleanup-rbac --dry-run
 # Clean up orphaned RBAC resources across all namespaces
 helm ttl cleanup-rbac --all-namespaces
 ```
+
+## Global Flags
+
+These flags apply to all subcommands:
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--release-namespace` | `HELM_NAMESPACE` or `default` | Override the release namespace |
 
 ## Commands
 
@@ -128,7 +142,7 @@ Durations are tried in this order:
 
 | Variable | Description |
 | -------- | ----------- |
-| `HELM_NAMESPACE` | Release namespace (set by Helm) |
+| `HELM_NAMESPACE` | Release namespace (set by Helm; overridden by `--release-namespace`) |
 | `HELM_KUBECONTEXT` | Kubernetes context to use |
 | `HELM_DRIVER` | Helm storage driver (default: `secrets`) |
 | `KUBECONFIG` | Path to kubeconfig file |
