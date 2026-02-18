@@ -41,6 +41,12 @@ helm ttl get my-release -o yaml
 # Remove TTL from a release
 helm ttl unset my-release
 
+# Immediately execute TTL for a release
+helm ttl run my-release
+
+# Execute TTL for a release with CronJob in a different namespace
+helm ttl run my-release --cronjob-namespace ops
+
 # Clean up orphaned RBAC resources (dry run)
 helm ttl cleanup-rbac --dry-run
 
@@ -79,6 +85,18 @@ Get the current TTL for a release.
 ### `helm ttl unset RELEASE [flags]`
 
 Remove TTL from a release by deleting the CronJob and cleaning up RBAC resources.
+
+**Flags:**
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--cronjob-namespace` | release namespace | Namespace where the CronJob lives |
+
+### `helm ttl run RELEASE [flags]`
+
+Immediately execute the TTL action for a release. This performs the same operations that the CronJob would: uninstall the release, optionally delete the namespace, delete the CronJob, and clean up RBAC resources.
+
+A TTL must already be set for the release (via `helm ttl set`).
 
 **Flags:**
 

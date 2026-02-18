@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"testing"
 
@@ -18,6 +19,7 @@ import (
 
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
+	kubefake "helm.sh/helm/v3/pkg/kube/fake"
 	helmrelease "helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/storage"
 	"helm.sh/helm/v3/pkg/storage/driver"
@@ -51,7 +53,11 @@ func setupTestStore(t *testing.T, releaseName, namespace string) *storage.Storag
 
 func testConfigFactory(store *storage.Storage) configFactory {
 	return func() (*action.Configuration, error) {
-		return &action.Configuration{Releases: store}, nil
+		return &action.Configuration{
+			Releases:   store,
+			KubeClient: &kubefake.PrintingKubeClient{Out: io.Discard},
+			Log:        func(format string, v ...interface{}) {},
+		}, nil
 	}
 }
 
@@ -78,8 +84,8 @@ func TestNewRootCmd(t *testing.T) {
 	assert.Equal(t, "helm-ttl", cmd.Use)
 	assert.Equal(t, version, cmd.Version)
 
-	// Should have 4 subcommands
-	assert.Len(t, cmd.Commands(), 4)
+	// Should have 5 subcommands
+	assert.Len(t, cmd.Commands(), 5)
 
 	names := make([]string, 0, len(cmd.Commands()))
 	for _, c := range cmd.Commands() {
@@ -88,6 +94,7 @@ func TestNewRootCmd(t *testing.T) {
 	assert.Contains(t, names, "set")
 	assert.Contains(t, names, "get")
 	assert.Contains(t, names, "unset")
+	assert.Contains(t, names, "run")
 	assert.Contains(t, names, "cleanup-rbac")
 }
 
@@ -538,6 +545,163 @@ func TestCleanupRBACCmd(t *testing.T) {
 		cmd.SetArgs([]string{"cleanup-rbac", "extra"})
 		err := cmd.Execute()
 		assert.Error(t, err)
+	})
+}
+
+func TestRunCmd(t *testing.T) {
+	origNs := os.Getenv("HELM_NAMESPACE")
+	defer func() { _ = os.Setenv("HELM_NAMESPACE", origNs) }()
+	_ = os.Setenv("HELM_NAMESPACE", "default")
+
+	t.Run("run TTL happy path", func(t *testing.T) {
+		store := setupTestStore(t, "myapp", "default")
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-default-ttl",
+				Namespace: "default",
+				Labels: map[string]string{
+					ttl.LabelManagedBy:        ttl.LabelManagedByValue,
+					ttl.LabelRelease:          "myapp",
+					ttl.LabelReleaseNamespace: "default",
+					ttl.LabelCronjobNamespace: "default",
+					ttl.LabelDeleteNamespace:  "false",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "30 14 15 3 *",
+			},
+		})
+
+		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"run", "myapp"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "TTL executed")
+		assert.Contains(t, buf.String(), "myapp")
+
+		// Verify CronJob was deleted
+		ctx := context.Background()
+		_, err = client.BatchV1().CronJobs("default").Get(ctx, "myapp-default-ttl", metav1.GetOptions{})
+		assert.Error(t, err)
+	})
+
+	t.Run("TTL not found", func(t *testing.T) {
+		store := setupTestStore(t, "myapp", "default")
+		client := fake.NewClientset()
+
+		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"run", "myapp"})
+
+		err := cmd.Execute()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no TTL set")
+	})
+
+	t.Run("config error", func(t *testing.T) {
+		client := fake.NewClientset()
+
+		cmd := newRootCmd(errorConfigFactory(), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"run", "myapp"})
+
+		err := cmd.Execute()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "configuration")
+	})
+
+	t.Run("kube client error", func(t *testing.T) {
+		store := setupTestStore(t, "myapp", "default")
+
+		cmd := newRootCmd(testConfigFactory(store), errorKubeFactory())
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"run", "myapp"})
+
+		err := cmd.Execute()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "kubernetes client")
+	})
+
+	t.Run("too few args", func(t *testing.T) {
+		cmd := newRootCmd(defaultConfigFactory, defaultKubeClientFactory)
+		cmd.SetArgs([]string{"run"})
+		err := cmd.Execute()
+		assert.Error(t, err)
+	})
+
+	t.Run("cross-namespace flag", func(t *testing.T) {
+		_ = os.Setenv("HELM_NAMESPACE", "staging")
+		defer func() { _ = os.Setenv("HELM_NAMESPACE", "default") }()
+
+		store := setupTestStore(t, "myapp", "staging")
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-staging-ttl",
+				Namespace: "ops",
+				Labels: map[string]string{
+					ttl.LabelManagedBy:        ttl.LabelManagedByValue,
+					ttl.LabelRelease:          "myapp",
+					ttl.LabelReleaseNamespace: "staging",
+					ttl.LabelCronjobNamespace: "ops",
+					ttl.LabelDeleteNamespace:  "false",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "0 12 1 1 *",
+			},
+		})
+
+		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"run", "myapp", "--cronjob-namespace", "ops"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "TTL executed")
+	})
+
+	t.Run("release already gone", func(t *testing.T) {
+		mem := driver.NewMemory()
+		store := storage.Init(mem)
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-default-ttl",
+				Namespace: "default",
+				Labels: map[string]string{
+					ttl.LabelManagedBy:        ttl.LabelManagedByValue,
+					ttl.LabelRelease:          "myapp",
+					ttl.LabelReleaseNamespace: "default",
+					ttl.LabelCronjobNamespace: "default",
+					ttl.LabelDeleteNamespace:  "false",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "30 14 15 3 *",
+			},
+		})
+
+		cmd := newRootCmd(testConfigFactory(store), testKubeFactoryWithClient(client))
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"run", "myapp"})
+
+		err := cmd.Execute()
+		require.NoError(t, err)
+		assert.Contains(t, stderr.String(), "Warning")
+		assert.Contains(t, stdout.String(), "TTL executed")
 	})
 }
 

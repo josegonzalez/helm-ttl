@@ -1,6 +1,6 @@
 name: "ttl"
 version: "0.2.0"
-usage: "helm ttl [set|get|unset|cleanup-rbac] [args]"
+usage: "helm ttl [set|get|unset|run|cleanup-rbac] [args]"
 description: "Manage TTL (time-to-live) for Helm releases"
 ignoreFlags: false
 platformCommand:

@@ -50,6 +50,7 @@ func newRootCmd(cfgFactory configFactory, kubeFactory kubeClientFactory) *cobra.
 		newSetCmd(cfgFactory, kubeFactory),
 		newGetCmd(kubeFactory),
 		newUnsetCmd(kubeFactory),
+		newRunCmd(cfgFactory, kubeFactory),
 		newCleanupRBACCmd(kubeFactory),
 	)
 
@@ -219,6 +220,65 @@ func newUnsetCmd(kubeFactory kubeClientFactory) *cobra.Command {
 			}
 
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "TTL removed for release %q in namespace %q\n", releaseName, releaseNs)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&cronjobNamespace, "cronjob-namespace", "", "namespace where the CronJob lives (default: release namespace)")
+
+	return cmd
+}
+
+func newRunCmd(cfgFactory configFactory, kubeFactory kubeClientFactory) *cobra.Command {
+	var cronjobNamespace string
+
+	cmd := &cobra.Command{
+		Use:   "run RELEASE",
+		Short: "Immediately run TTL for a Helm release",
+		Long: `Immediately execute the TTL action for a Helm release. This performs the
+same operations that the CronJob would: uninstall the release, optionally delete
+the namespace, delete the CronJob, and clean up RBAC resources.
+
+A TTL must already be set for the release (via helm ttl set).`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			releaseName := args[0]
+			releaseNs := getReleaseNamespace()
+			cjNs := cronjobNamespace
+			if cjNs == "" {
+				cjNs = releaseNs
+			}
+
+			cfg, err := cfgFactory()
+			if err != nil {
+				return fmt.Errorf("failed to create configuration: %w", err)
+			}
+
+			client, err := kubeFactory()
+			if err != nil {
+				return fmt.Errorf("failed to create kubernetes client: %w", err)
+			}
+
+			ctx := context.Background()
+			result, err := ttl.RunTTL(ctx, cfg, client, releaseName, releaseNs, cjNs)
+			if err != nil {
+				var notFound *ttl.TTLNotFoundError
+				if errors.As(err, &notFound) {
+					return fmt.Errorf("no TTL set for release %q in namespace %q", releaseName, releaseNs)
+				}
+
+				return err
+			}
+
+			if result.ReleaseNotFound {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: release %q was not found (already uninstalled?)\n", releaseName)
+			}
+
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "TTL executed for release %q in namespace %q\n", releaseName, result.ReleaseNamespace)
+			if result.DeletedNamespace {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Namespace %q deleted\n", result.ReleaseNamespace)
+			}
+
 			return nil
 		},
 	}

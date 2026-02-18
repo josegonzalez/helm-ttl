@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,6 +18,7 @@ import (
 
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
+	kubefake "helm.sh/helm/v3/pkg/kube/fake"
 	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/storage"
 	"helm.sh/helm/v3/pkg/storage/driver"
@@ -45,7 +47,11 @@ func setupTestRelease(t *testing.T, name, namespace string) (*action.Configurati
 	err := store.Create(rel)
 	require.NoError(t, err)
 
-	cfg := &action.Configuration{Releases: store}
+	cfg := &action.Configuration{
+		Releases:   store,
+		KubeClient: &kubefake.PrintingKubeClient{Out: io.Discard},
+		Log:        func(format string, v ...interface{}) {},
+	}
 	return cfg, store
 }
 
@@ -595,4 +601,170 @@ func TestUnsetTTL_APIError(t *testing.T) {
 	err := UnsetTTL(ctx, client, "myapp", "default", "default")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to delete CronJob")
+}
+
+func TestRunTTL(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("happy path same namespace", func(t *testing.T) {
+		cfg, _ := setupTestRelease(t, "myapp", "default")
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-default-ttl",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelManagedBy:        LabelManagedByValue,
+					LabelRelease:          "myapp",
+					LabelReleaseNamespace: "default",
+					LabelCronjobNamespace: "default",
+					LabelDeleteNamespace:  "false",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "30 14 15 3 *",
+			},
+		})
+
+		result, err := RunTTL(ctx, cfg, client, "myapp", "default", "default")
+		require.NoError(t, err)
+		assert.Equal(t, "myapp", result.ReleaseName)
+		assert.Equal(t, "default", result.ReleaseNamespace)
+		assert.False(t, result.ReleaseNotFound)
+		assert.False(t, result.DeletedNamespace)
+
+		// Verify CronJob is gone
+		_, err = client.BatchV1().CronJobs("default").Get(ctx, "myapp-default-ttl", metav1.GetOptions{})
+		assert.Error(t, err)
+	})
+
+	t.Run("cross-namespace with delete-namespace", func(t *testing.T) {
+		cfg, _ := setupTestRelease(t, "myapp", "staging")
+		client := fake.NewClientset(
+			&batchv1.CronJob{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "myapp-staging-ttl",
+					Namespace: "ops",
+					Labels: map[string]string{
+						LabelManagedBy:        LabelManagedByValue,
+						LabelRelease:          "myapp",
+						LabelReleaseNamespace: "staging",
+						LabelCronjobNamespace: "ops",
+						LabelDeleteNamespace:  "true",
+					},
+				},
+				Spec: batchv1.CronJobSpec{
+					Schedule: "0 12 1 1 *",
+				},
+			},
+			&corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "staging",
+				},
+			},
+		)
+
+		result, err := RunTTL(ctx, cfg, client, "myapp", "staging", "ops")
+		require.NoError(t, err)
+		assert.False(t, result.ReleaseNotFound)
+		assert.True(t, result.DeletedNamespace)
+
+		// Verify CronJob is gone
+		_, err = client.BatchV1().CronJobs("ops").Get(ctx, "myapp-staging-ttl", metav1.GetOptions{})
+		assert.Error(t, err)
+
+		// Verify namespace is gone
+		_, err = client.CoreV1().Namespaces().Get(ctx, "staging", metav1.GetOptions{})
+		assert.Error(t, err)
+	})
+
+	t.Run("TTL not found", func(t *testing.T) {
+		cfg, _ := setupTestRelease(t, "myapp", "default")
+		client := fake.NewClientset()
+
+		_, err := RunTTL(ctx, cfg, client, "myapp", "default", "default")
+		var notFound *TTLNotFoundError
+		assert.True(t, errors.As(err, &notFound))
+	})
+
+	t.Run("release already gone", func(t *testing.T) {
+		mem := driver.NewMemory()
+		store := storage.Init(mem)
+		cfg := &action.Configuration{
+			Releases:   store,
+			KubeClient: &kubefake.PrintingKubeClient{Out: io.Discard},
+			Log:        func(format string, v ...interface{}) {},
+		}
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-default-ttl",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelManagedBy:        LabelManagedByValue,
+					LabelRelease:          "myapp",
+					LabelReleaseNamespace: "default",
+					LabelCronjobNamespace: "default",
+					LabelDeleteNamespace:  "false",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "30 14 15 3 *",
+			},
+		})
+
+		result, err := RunTTL(ctx, cfg, client, "myapp", "default", "default")
+		require.NoError(t, err)
+		assert.True(t, result.ReleaseNotFound)
+
+		// CronJob should still be cleaned up
+		_, err = client.BatchV1().CronJobs("default").Get(ctx, "myapp-default-ttl", metav1.GetOptions{})
+		assert.Error(t, err)
+	})
+
+	t.Run("resource name too long", func(t *testing.T) {
+		cfg, _ := setupTestRelease(t, "a-very-long-release-name-that-will-exceed", "default")
+		client := fake.NewClientset()
+
+		_, err := RunTTL(ctx, cfg, client, "a-very-long-release-name-that-will-exceed", "a-long-namespace", "default")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds maximum length")
+	})
+
+	t.Run("CronJob get API error", func(t *testing.T) {
+		cfg, _ := setupTestRelease(t, "myapp", "default")
+		client := fake.NewClientset()
+		client.PrependReactor("get", "cronjobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, fmt.Errorf("simulated API error")
+		})
+
+		_, err := RunTTL(ctx, cfg, client, "myapp", "default", "default")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to get CronJob")
+	})
+
+	t.Run("CronJob delete API error", func(t *testing.T) {
+		cfg, _ := setupTestRelease(t, "myapp", "default")
+		client := fake.NewClientset(&batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "myapp-default-ttl",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelManagedBy:        LabelManagedByValue,
+					LabelRelease:          "myapp",
+					LabelReleaseNamespace: "default",
+					LabelCronjobNamespace: "default",
+					LabelDeleteNamespace:  "false",
+				},
+			},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "30 14 15 3 *",
+			},
+		})
+		client.PrependReactor("delete", "cronjobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, fmt.Errorf("simulated delete error")
+		})
+
+		_, err := RunTTL(ctx, cfg, client, "myapp", "default", "default")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to delete CronJob")
+	})
 }
