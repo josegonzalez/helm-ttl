@@ -22,25 +22,41 @@ jobs:
 
       - name: Check coverage
         run: |
-          echo "Coverage by function:"
-          go tool cover -func=coverage.out
-          echo ""
-          # Check pkg/status coverage (core logic) - must be 100%
-          PKG_COVERAGE=$(go tool cover -func=coverage.out | grep "pkg/status" | grep "total" | awk '{print $3}' | sed 's/%//' || echo "0")
-          if [ -z "$PKG_COVERAGE" ]; then
-            # Calculate pkg/status coverage manually
-            PKG_COVERAGE=$(go tool cover -func=coverage.out | grep "pkg/status/" | awk '{sum+=$3; count++} END {if(count>0) print sum/count; else print 0}')
-          fi
-          echo "Package coverage (pkg/status): ${PKG_COVERAGE}%"
-          # Total coverage check (allows for main() not being tested)
-          TOTAL_COVERAGE=$(go tool cover -func=coverage.out | grep "^total:" | awk '{print $3}' | sed 's/%//')
-          echo "Total coverage: ${TOTAL_COVERAGE}%"
-          # Require at least 95% total coverage
+          FUNC_OUTPUT=$(go tool cover -func=coverage.out)
+          TOTAL_COVERAGE=$(echo "$FUNC_OUTPUT" | grep "^total:" | awk '{print $3}' | sed 's/%//')
+
           if [ "$(echo "$TOTAL_COVERAGE < 95" | bc)" -eq 1 ]; then
+            STATUS="FAILED"
+            ICON=":x:"
+          else
+            STATUS="PASSED"
+            ICON=":white_check_mark:"
+          fi
+
+          {
+            echo "## Code Coverage Report"
+            echo ""
+            echo "**Status: ${STATUS}** ${ICON} — Total coverage: **${TOTAL_COVERAGE}%** (threshold: 95%)"
+            echo ""
+            echo "### Coverage by Function"
+            echo ""
+            echo "| File | Function | Coverage |"
+            echo "|------|----------|----------|"
+            echo "$FUNC_OUTPUT" | grep -v "^total:" | while IFS= read -r line; do
+              FILE=$(echo "$line" | awk '{print $1}' | sed 's|github.com/josegonzalez/helm-ttl/||' | sed 's/:$//')
+              FUNC=$(echo "$line" | awk '{print $2}')
+              COV=$(echo "$line" | awk '{print $3}')
+              echo "| \`${FILE}\` | \`${FUNC}\` | ${COV} |"
+            done
+            echo ""
+            echo "---"
+            echo "| **Total** | | **${TOTAL_COVERAGE}%** |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$STATUS" = "FAILED" ]; then
             echo "Coverage is below 95%!"
             exit 1
           fi
-          echo "Coverage check passed!"
 
   lint:
     runs-on: ubuntu-latest
